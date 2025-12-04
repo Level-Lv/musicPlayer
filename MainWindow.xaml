@@ -6,6 +6,16 @@
         xmlns:local="clr-namespace:musicPlayer"
         mc:Ignorable="d"
         Title="音乐播放器" Height="600" Width="1000">
+    <Window.Resources>
+        <Storyboard x:Key="SpinningAnimation" x:Name="SpinningStoryboard">
+            <DoubleAnimation 
+            Storyboard.TargetName="RotationTransform" 
+            Storyboard.TargetProperty="Angle" 
+            From="0" To="360" 
+            Duration="0:0:5"         RepeatBehavior="Forever" />
+        </Storyboard>
+    </Window.Resources>
+    
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="1.5*"/>
@@ -35,7 +45,8 @@
           d:ItemsSource="{d:SampleData ItemCount=5}"
           Grid.Column="0"
           Grid.Row="1"
-          Margin="1">
+          Margin="1"
+          MouseDoubleClick="musicfilesListView_MouseDoubleClick">
 
             <ListView.Resources>
                 <Style TargetType="GridViewColumnHeader">
@@ -88,6 +99,30 @@
                 </GridView>
             </ListView.View>
         </ListView>
+
+        <Grid Grid.Row="1" Grid.Column="1" Margin="1">
+
+            <Viewbox Width="350" Height="350" HorizontalAlignment="Center" VerticalAlignment="Center">
+
+                <Grid x:Name="VisualizerGrid" Width="100" Height="100">
+                    <Grid.RenderTransform>
+                        <RotateTransform x:Name="RotationTransform" CenterX="50" CenterY="50"/>
+                    </Grid.RenderTransform>
+
+                    <Ellipse Fill="#303030" Stroke="Silver" StrokeThickness="1" Width="100" Height="100"/>
+                    <Ellipse Fill="#101010" Stroke="DarkGray" StrokeThickness="0.5" Width="70" Height="70"/>
+                    <Ellipse Fill="#505050" Stroke="Silver" StrokeThickness="1" Width="10" Height="10"/>
+
+                    <Rectangle Width="5" Height="100" Fill="#202020"/>
+                    <Rectangle Width="100" Height="5" Fill="#202020"/>
+                </Grid>
+
+            </Viewbox>
+
+            <MediaElement x:Name="mediaPlayer"
+                      LoadedBehavior="Manual"
+                      Visibility="Collapsed"/>
+        </Grid>
 
     </Grid>
 </Window>

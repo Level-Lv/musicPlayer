@@ -6,6 +6,9 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Forms;
 using TagLib;
+using System.Windows.Media.Animation;
+using System.Windows.Media;
+using System.Windows.Controls;
 
 namespace musicPlayer
 {
@@ -18,12 +21,14 @@ namespace musicPlayer
     public partial class MainWindow : Window
     {
         private ObservableCollection<MusicFile> MusicFiles { get; set; }
+        private Storyboard? spinningStoryboard;
 
         public MainWindow()
         {
             InitializeComponent();
             MusicFiles = new ObservableCollection<MusicFile>();
             musicfilesListView.ItemsSource = MusicFiles;
+            spinningStoryboard = this.FindResource("SpinningAnimation") as Storyboard;
         }
 
         private void btnSelectFolder_Click(object sender, RoutedEventArgs e)
@@ -94,5 +99,61 @@ namespace musicPlayer
                 }
             }
         }
+
+        private void musicfilesListView_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (musicfilesListView.SelectedItem is MusicFile selectedFile)
+            {
+                PlayMusic(selectedFile.FullPath);
+            }
+        }
+
+        private void PlayMusic(string? filePath)
+        {
+            if (string.IsNullOrEmpty(filePath))
+            {
+                System.Windows.MessageBox.Show("未找到文件路径。", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            try
+            {
+                mediaPlayer.Stop();
+                mediaPlayer.Source = new Uri(filePath);
+                mediaPlayer.Play();
+
+                if (spinningStoryboard != null)
+                {
+                    spinningStoryboard.Begin(VisualizerGrid, true);
+                }
+
+                this.Title = $"正在播放: {Path.GetFileNameWithoutExtension(filePath)} - 音乐播放器";
+
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"播放文件失败: {ex.Message}", "播放错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        public void PauseMusic()
+        {
+            mediaPlayer.Pause();
+            if (spinningStoryboard != null)
+            {
+                spinningStoryboard.Pause(VisualizerGrid);
+            }
+        }
+
+        public void StopMusic()
+        {
+            mediaPlayer.Stop();
+            if (spinningStoryboard != null)
+            {
+                spinningStoryboard.Stop(VisualizerGrid);
+            }
+            this.Title = "音乐播放器";
+        }
+
     }
 }
