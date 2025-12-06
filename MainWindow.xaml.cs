@@ -4,11 +4,14 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Windows;
-using System.Windows.Forms;
-using TagLib;
-using System.Windows.Media.Animation;
-using System.Windows.Media;
 using System.Windows.Controls;
+using System.Windows.Forms;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using TagLib;
 
 namespace musicPlayer
 {
@@ -22,25 +25,192 @@ namespace musicPlayer
     {
         private ObservableCollection<MusicFile> MusicFiles { get; set; }
         private Storyboard? spinningStoryboard;
+        private bool isPlaying = false;
+        private readonly DispatcherTimer timer;
+        private const string CirclePictureFileName = "circlePicture.txt";
+        private const string BackgroundVideoFileName = "backgroundVideo.txt";
+        private const string MusicPathFileName = "musicPath.txt";
+        private bool isHandlingAutoPlay = false;
+        private bool isShuffleMode = false;
 
         public MainWindow()
         {
             InitializeComponent();
             MusicFiles = new ObservableCollection<MusicFile>();
-            musicfilesListView.ItemsSource = MusicFiles;
+            musicfilesListView.ItemsSource = MusicFiles; // Bind the ListView to the ObservableCollection
             spinningStoryboard = this.FindResource("SpinningAnimation") as Storyboard;
+            mediaPlayer.MediaEnded += mediaPlayer_MediaEnded;
+            mediaPlayer.MediaOpened += mediaPlayer_MediaOpened;
+            timer = new DispatcherTimer();
+            timer.Interval = TimeSpan.FromSeconds(1);
+            timer.Tick += timer_Tick;
+            UpdateShuffleButtonContent();
+
+            string? savedMusicPath = LoadPathFromFile(MusicPathFileName); // Load saved music path
+            if (!string.IsNullOrEmpty(savedMusicPath))
+            {
+                LoadMusicFiles(savedMusicPath);
+            }
+
+            string? savedCircleImagePath = LoadPathFromFile(CirclePictureFileName); // Load saved circle picture path
+            if (!string.IsNullOrEmpty(savedCircleImagePath))
+            {
+                LoadAlbumCover(savedCircleImagePath);
+            }
+
+            string? savedVideoPath = LoadPathFromFile(BackgroundVideoFileName); // Load saved background video path
+            if (!string.IsNullOrEmpty(savedVideoPath))
+            {
+                LoadBackgroundVideo(savedVideoPath);
+            }
+        }
+
+        private void UpdateShuffleButtonContent()
+        {
+            if (btnShuffleToggle != null)
+            {
+                if (!isShuffleMode)
+                {
+                    btnShuffleToggle.Content = "🔁";
+                }
+                else
+                {
+                    btnShuffleToggle.Content = "🔀";
+                }
+            }
+        }
+
+        private void SavePathToFile(string fileName, string filePath)
+        {
+            try
+            {
+                string directory = AppDomain.CurrentDomain.BaseDirectory;
+                string fullPath = Path.Combine(directory, fileName);
+                System.IO.File.WriteAllText(fullPath, filePath);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"保存路径到文件 {fileName} 失败: {ex.Message}");
+            }
+        }
+
+        private string? LoadPathFromFile(string fileName)
+        {
+            try
+            {
+                string directory = AppDomain.CurrentDomain.BaseDirectory;
+                string fullPath = Path.Combine(directory, fileName);
+
+                if (System.IO.File.Exists(fullPath))
+                {
+                    string content = System.IO.File.ReadAllText(fullPath).Trim();
+                    return string.IsNullOrWhiteSpace(content) ? null : content;
+                }
+                else
+                {
+                    System.IO.File.Create(fullPath).Dispose();
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"加载路径从文件 {fileName} 失败: {ex.Message}");
+                return null;
+            }
+        }
+
+        private void LoadAlbumCover(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            try
+            {
+                BitmapImage newImage = new BitmapImage(new Uri(filePath, UriKind.Absolute));
+                AlbumCoverBrush.ImageSource = newImage;
+                System.Diagnostics.Debug.WriteLine($"专辑封面加载成功: {filePath}");
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"加载图片失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                AlbumCoverBrush.ImageSource = null;
+            }
+        }
+
+        private void timer_Tick(object? sender, EventArgs e)
+        {
+            if (mediaPlayer.Source != null && mediaPlayer.NaturalDuration.HasTimeSpan)
+            {
+                sliderProgress.Value = mediaPlayer.Position.TotalSeconds;
+                txtCurrentTime.Text = mediaPlayer.Position.ToString(@"mm\:ss");
+            }
+        }
+
+        private void mediaPlayer_MediaOpened(object? sender, RoutedEventArgs e)
+        {
+            if (mediaPlayer.NaturalDuration.HasTimeSpan)
+            {
+                sliderProgress.Maximum = mediaPlayer.NaturalDuration.TimeSpan.TotalSeconds;
+                txtTotalTime.Text = mediaPlayer.NaturalDuration.TimeSpan.ToString(@"mm\:ss");
+            }
+            else
+            {
+                sliderProgress.Maximum = 0;
+                txtTotalTime.Text = "00:00";
+            }
+        }
+
+        private void sliderProgress_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            TimeSpan newPosition = TimeSpan.FromSeconds(sliderProgress.Value);
+            mediaPlayer.Position = newPosition;
+
+            if (!isPlaying)
+            {
+                mediaPlayer.Play();
+                if (spinningStoryboard != null) spinningStoryboard.Begin(VisualizerGrid, true);
+                timer.Start();
+                isPlaying = true;
+            }
+        }
+
+        private void btnPlayPause_Click(object sender, RoutedEventArgs e)
+        {
+            if (mediaPlayer.Source == null) return;
+
+            if (isPlaying)
+            {
+                mediaPlayer.Pause();
+                if (spinningStoryboard != null) spinningStoryboard.Pause(VisualizerGrid);
+                timer.Stop();
+                btnPlayPause.Content = "▶️";
+                isPlaying = false;
+            }
+            else
+            {
+                mediaPlayer.Play();
+                if (spinningStoryboard != null) spinningStoryboard.Resume(VisualizerGrid);
+                timer.Start();
+                btnPlayPause.Content = "⏸️";
+                isPlaying = true;
+            }
         }
 
         private void btnSelectFolder_Click(object sender, RoutedEventArgs e)
         {
-            using (var dialog = new FolderBrowserDialog())
+            using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
             {
                 DialogResult result = dialog.ShowDialog();
 
                 if (result == System.Windows.Forms.DialogResult.OK)
                 {
                     string selectedPath = dialog.SelectedPath;
+
                     LoadMusicFiles(selectedPath);
+
+                    if (MusicFiles.Count > 0)
+                    {
+                        SavePathToFile(MusicPathFileName, selectedPath);
+                    }
                 }
             }
         }
@@ -105,6 +275,7 @@ namespace musicPlayer
             if (musicfilesListView.SelectedItem is MusicFile selectedFile)
             {
                 PlayMusic(selectedFile.FullPath);
+                btnPlayPause.Content = "⏸️";
             }
         }
 
@@ -122,10 +293,10 @@ namespace musicPlayer
                 mediaPlayer.Source = new Uri(filePath);
                 mediaPlayer.Play();
 
-                if (spinningStoryboard != null)
-                {
-                    spinningStoryboard.Begin(VisualizerGrid, true);
-                }
+                if (spinningStoryboard != null) spinningStoryboard.Begin(VisualizerGrid, true);
+                timer.Start();
+
+                isPlaying = true;
 
                 this.Title = $"正在播放: {Path.GetFileNameWithoutExtension(filePath)} - 音乐播放器";
 
@@ -147,13 +318,196 @@ namespace musicPlayer
 
         public void StopMusic()
         {
-            mediaPlayer.Stop();
             if (spinningStoryboard != null)
             {
                 spinningStoryboard.Stop(VisualizerGrid);
             }
-            this.Title = "音乐播放器";
+            timer.Stop();
         }
 
+        private void mediaPlayer_MediaEnded(object sender, RoutedEventArgs e)
+        {
+            if (isHandlingAutoPlay)
+            {
+                isHandlingAutoPlay = false;
+                return;
+            }
+
+            isHandlingAutoPlay = true;
+            StopMusic();
+
+            if (MusicFiles.Count == 0)
+            {
+                isHandlingAutoPlay = false;
+                return;
+            }
+
+            int nextIndex;
+            if (isShuffleMode)
+            {
+                Random random = new Random();
+                int currentIndex = musicfilesListView.SelectedIndex;
+
+                do
+                {
+                    nextIndex = random.Next(0, MusicFiles.Count);
+                } while (MusicFiles.Count > 1 && nextIndex == currentIndex);
+            }
+            else
+            {
+                int currentIndex = musicfilesListView.SelectedIndex;
+                nextIndex = (currentIndex + 1) % MusicFiles.Count;
+            }
+
+            MusicFile nextFile = MusicFiles[nextIndex];
+            musicfilesListView.SelectedIndex = nextIndex;
+            PlayMusic(nextFile.FullPath);
+
+            btnPlayPause.Content = "⏸️";
+        }
+
+        private void backgroundVideo_MediaEnded(object sender, RoutedEventArgs e)
+        {
+            backgroundVideo.Position = TimeSpan.Zero;
+            backgroundVideo.Play();
+        }
+
+        private void VisualizerGrid_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            System.Windows.Forms.OpenFileDialog openFileDialog = new System.Windows.Forms.OpenFileDialog();
+
+            openFileDialog.Filter = "图片文件|*.jpg;*.jpeg;*.png;*.bmp|所有文件|*.*";
+
+            if (openFileDialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+            {
+                string selectedImagePath = openFileDialog.FileName;
+
+                LoadAlbumCover(selectedImagePath);
+
+                SavePathToFile(CirclePictureFileName, selectedImagePath);
+            }
+        }
+
+        private void btnSetBackgroundVideo_Click(object sender, RoutedEventArgs e)
+        {
+            Microsoft.Win32.OpenFileDialog openFileDialog = new Microsoft.Win32.OpenFileDialog();
+
+            openFileDialog.Filter = "视频文件|*.mp4;*.avi;*.wmv;*.mov|所有文件|*.*";
+
+            if (openFileDialog.ShowDialog() == true)
+            {
+                string selectedVideoPath = openFileDialog.FileName;
+
+                LoadBackgroundVideo(selectedVideoPath);
+
+                SavePathToFile(BackgroundVideoFileName, selectedVideoPath);
+            }
+        }
+
+        private void LoadBackgroundVideo(string filePath)
+        {
+            try
+            {
+                backgroundVideo.Stop();
+                backgroundVideo.Source = new Uri(filePath, UriKind.Absolute);
+
+                backgroundVideo.Play();
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"加载背景视频失败: {ex.Message}", "视频错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                backgroundVideo.Source = null;
+            }
+        }
+
+        private void btnShuffle_Click(object sender, RoutedEventArgs e)
+        {
+            if (MusicFiles.Count == 0)
+            {
+                System.Windows.MessageBox.Show("请先选择包含音乐文件的文件夹。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            Random random = new Random();
+            int randomIndex = random.Next(0, MusicFiles.Count);
+            MusicFile selectedFile = MusicFiles[randomIndex];
+            musicfilesListView.SelectedIndex = randomIndex;
+
+            PlayMusic(selectedFile.FullPath);
+            btnPlayPause.Content = "⏸️";
+        }
+
+        private void btnNext_Click(object sender, RoutedEventArgs e)
+        {
+            if (MusicFiles.Count == 0) return;
+
+            int currentIndex = musicfilesListView.SelectedIndex;
+
+            if (currentIndex == -1)
+            {
+                currentIndex = 0;
+            }
+
+            int nextIndex;
+
+            if (isShuffleMode)
+            {
+                Random random = new Random();
+
+                do
+                {
+                    nextIndex = random.Next(0, MusicFiles.Count);
+                } while (MusicFiles.Count > 1 && nextIndex == currentIndex);
+            }
+            else
+            {
+                nextIndex = (currentIndex + 1) % MusicFiles.Count;
+            }
+
+            MusicFile nextFile = MusicFiles[nextIndex];
+            musicfilesListView.SelectedIndex = nextIndex;
+            PlayMusic(nextFile.FullPath);
+            btnPlayPause.Content = "⏸️";
+        }
+
+        private void btnPrevious_Click(object sender, RoutedEventArgs e)
+        {
+            if (MusicFiles.Count == 0) return;
+
+            int currentIndex = musicfilesListView.SelectedIndex;
+
+            if (currentIndex == -1)
+            {
+                currentIndex = 0;
+            }
+
+            int prevIndex;
+
+            if (isShuffleMode)
+            {
+                Random random = new Random();
+
+                do
+                {
+                    prevIndex = random.Next(0, MusicFiles.Count);
+                } while (MusicFiles.Count > 1 && prevIndex == currentIndex);
+            }
+            else
+            {
+                prevIndex = (currentIndex - 1 + MusicFiles.Count) % MusicFiles.Count;
+            }
+
+            MusicFile prevFile = MusicFiles[prevIndex];
+            musicfilesListView.SelectedIndex = prevIndex;
+            PlayMusic(prevFile.FullPath);
+
+            btnPlayPause.Content = "⏸️";
+        }
+
+        private void btnShuffleToggle_Click(object sender, RoutedEventArgs e)
+        {
+            isShuffleMode = !isShuffleMode;
+            UpdateShuffleButtonContent();
+        }
     }
 }
