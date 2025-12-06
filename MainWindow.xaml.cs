@@ -12,6 +12,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using TagLib;
+using System.Text.RegularExpressions;
 
 namespace musicPlayer
 {
@@ -21,8 +22,16 @@ namespace musicPlayer
         public TimeSpan Duration { get; set; }
         public string? FullPath { get; set; }
     }
+
     public partial class MainWindow : Window
     {
+        private class LyricLine
+        {
+            public string? Text { get; set; }
+            public TimeSpan Timestamp { get; set; }
+            public TextBlock? Control { get; set; }
+        }
+
         private ObservableCollection<MusicFile> MusicFiles { get; set; }
         private Storyboard? spinningStoryboard;
         private bool isPlaying = false;
@@ -32,6 +41,8 @@ namespace musicPlayer
         private const string MusicPathFileName = "musicPath.txt";
         private bool isHandlingAutoPlay = false;
         private bool isShuffleMode = false;
+        private List<LyricLine> CurrentLyrics = new List<LyricLine>();
+        private int CurrentLyricIndex = -1;
 
         public MainWindow()
         {
@@ -39,10 +50,12 @@ namespace musicPlayer
             MusicFiles = new ObservableCollection<MusicFile>();
             musicfilesListView.ItemsSource = MusicFiles; // Bind the ListView to the ObservableCollection
             spinningStoryboard = this.FindResource("SpinningAnimation") as Storyboard;
+
             mediaPlayer.MediaEnded += mediaPlayer_MediaEnded;
             mediaPlayer.MediaOpened += mediaPlayer_MediaOpened;
+
             timer = new DispatcherTimer();
-            timer.Interval = TimeSpan.FromSeconds(1);
+            timer.Interval = TimeSpan.FromMilliseconds(50);
             timer.Tick += timer_Tick;
             UpdateShuffleButtonContent();
 
@@ -63,6 +76,191 @@ namespace musicPlayer
             {
                 LoadBackgroundVideo(savedVideoPath);
             }
+
+            string lrcDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lrc");
+            if (!Directory.Exists(lrcDirectory))
+            {
+                try
+                {
+                    Directory.CreateDirectory(lrcDirectory);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Failed to create LRC directory: {ex.Message}");
+                }
+            }
+        }
+
+        private void UpdateLyricsDisplay()
+        {
+            LyricsPanel.Children.Clear();
+
+            Style normalStyle = (Style)this.FindResource("NormalLyricTextBlockStyle");
+            Style highlightStyle = (Style)this.FindResource("HighlightLyricTextBlockStyle");
+
+            if (CurrentLyrics.Count == 0) return;
+
+            for (int i = 0; i < CurrentLyrics.Count; i++)
+            {
+                var lyric = CurrentLyrics[i];
+                var tb = new TextBlock
+                {
+                    Text = lyric.Text,
+                    Style = (i == 0 && CurrentLyrics.Count == 1) ? highlightStyle : normalStyle,
+                    TextWrapping = TextWrapping.Wrap,
+                    HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                    Opacity = (i == 0 && CurrentLyrics.Count == 1) ? 1.0 : 0.6
+                };
+                lyric.Control = tb;
+                LyricsPanel.Children.Add(tb);
+            }
+
+            if (CurrentLyrics.Count == 1)
+            {
+                LyricsPanel.VerticalAlignment = VerticalAlignment.Center;
+            }
+            else
+            {
+                LyricsPanel.VerticalAlignment = VerticalAlignment.Top;
+            }
+        }
+
+        private void CheckAndUpdateLyrics()
+        {
+            if (CurrentLyrics.Count <= 1 || mediaPlayer.Source == null) return;
+
+            TimeSpan currentPosition = mediaPlayer.Position;
+            int nextIndex = -1;
+
+            for (int i = CurrentLyricIndex + 1; i < CurrentLyrics.Count; i++)
+            {
+                if (currentPosition >= CurrentLyrics[i].Timestamp)
+                {
+                    continue;
+                }
+
+                nextIndex = i;
+                break;
+            }
+
+            int targetIndex = (nextIndex == -1) ? CurrentLyrics.Count - 1 : nextIndex - 1;
+
+            if (targetIndex != CurrentLyricIndex && targetIndex >= 0)
+            {
+                if (CurrentLyricIndex >= 0 && CurrentLyricIndex < CurrentLyrics.Count)
+                {
+                    var oldLyric = CurrentLyrics[CurrentLyricIndex].Control;
+                    if (oldLyric != null)
+                    {
+                        oldLyric.Style = (Style)this.FindResource("NormalLyricTextBlockStyle");
+                        oldLyric.Opacity = 0.6;
+                    }
+                }
+
+                var newLyric = CurrentLyrics[targetIndex].Control;
+                if (newLyric != null)
+                {
+                    newLyric.Style = (Style)this.FindResource("HighlightLyricTextBlockStyle");
+                    newLyric.Opacity = 1.0;
+
+                    newLyric.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+                    {
+                        System.Windows.Point lyricPosition = newLyric.TranslatePoint(new System.Windows.Point(0, 0), LyricsPanel);
+
+                        double viewportHeight = LyricsScrollViewer.ViewportHeight;
+
+                        double lyricHeight = newLyric.ActualHeight;
+
+                        double targetOffset = lyricPosition.Y - (viewportHeight / 2.0) + (lyricHeight / 2.0);
+
+                        if (targetOffset < 0)
+                        {
+                            targetOffset = 0;
+                        }
+
+                        double maxOffset = LyricsScrollViewer.ScrollableHeight;
+                        if (targetOffset > maxOffset)
+                        {
+                            targetOffset = maxOffset;
+                        }
+
+                        LyricsScrollViewer.ScrollToVerticalOffset(targetOffset);
+                    }));
+                }
+
+                CurrentLyricIndex = targetIndex;
+            }
+        }
+
+        private List<LyricLine> ParseLrcFile(string lrcFilePath)
+        {
+            var lyrics = new List<LyricLine>();
+            try
+            {
+                string[] lines = System.IO.File.ReadAllLines(lrcFilePath);
+
+                foreach (string line in lines)
+                {
+                    var match = Regex.Match(line, @"\[(\d{1,2}):(\d{2})\.(\d{2,3})\](.*)");
+
+                    if (match.Success)
+                    {
+                        int minutes = int.Parse(match.Groups[1].Value);
+                        int seconds = int.Parse(match.Groups[2].Value);
+                        string millisecondsString = match.Groups[3].Value.PadRight(3, '0');
+                        int milliseconds = int.Parse(millisecondsString);
+
+                        TimeSpan timestamp = new TimeSpan(0, 0, minutes, seconds, milliseconds);
+                        string text = match.Groups[4].Value.Trim();
+
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            lyrics.Add(new LyricLine { Text = text, Timestamp = timestamp });
+                        }
+                    }
+                }
+
+                return lyrics.OrderBy(l => l.Timestamp).ToList();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"LRC file parsing failed for {lrcFilePath}: {ex.Message}");
+                return new List<LyricLine>();
+            }
+        }
+
+        private void LoadLyricsForCurrentSong(string? audioFilePath)
+        {
+            CurrentLyrics.Clear();
+            LyricsPanel.Children.Clear();
+
+            if (string.IsNullOrEmpty(audioFilePath))
+            {
+                CurrentLyrics.Add(new LyricLine { Text = "未选择歌曲" });
+                UpdateLyricsDisplay();
+                return;
+            }
+
+            string musicFileNameWithoutExtension = Path.GetFileNameWithoutExtension(audioFilePath);
+            string lrcFileName = $"{musicFileNameWithoutExtension}.lrc";
+            string lrcDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lrc");
+            string lrcFilePath = Path.Combine(lrcDirectory, lrcFileName);
+
+            if (System.IO.File.Exists(lrcFilePath))
+            {
+                CurrentLyrics = ParseLrcFile(lrcFilePath);
+                if (CurrentLyrics.Count == 0)
+                {
+                    CurrentLyrics.Add(new LyricLine { Text = "歌词文件为空或解析失败" });
+                }
+            }
+            else
+            {
+                CurrentLyrics.Add(new LyricLine { Text = "当前歌曲无歌词" });
+            }
+
+            CurrentLyricIndex = -1;
+            UpdateLyricsDisplay();
         }
 
         private void UpdateShuffleButtonContent()
@@ -127,7 +325,6 @@ namespace musicPlayer
             {
                 BitmapImage newImage = new BitmapImage(new Uri(filePath, UriKind.Absolute));
                 AlbumCoverBrush.ImageSource = newImage;
-                System.Diagnostics.Debug.WriteLine($"专辑封面加载成功: {filePath}");
             }
             catch (Exception ex)
             {
@@ -142,6 +339,7 @@ namespace musicPlayer
             {
                 sliderProgress.Value = mediaPlayer.Position.TotalSeconds;
                 txtCurrentTime.Text = mediaPlayer.Position.ToString(@"mm\:ss");
+                CheckAndUpdateLyrics();
             }
         }
 
@@ -292,6 +490,7 @@ namespace musicPlayer
                 mediaPlayer.Stop();
                 mediaPlayer.Source = new Uri(filePath);
                 mediaPlayer.Play();
+                LoadLyricsForCurrentSong(filePath);
 
                 if (spinningStoryboard != null) spinningStoryboard.Begin(VisualizerGrid, true);
                 timer.Start();
