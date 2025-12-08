@@ -1,8 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Numerics;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Forms;
@@ -12,42 +16,59 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using TagLib;
-using System.Text.RegularExpressions;
 
 namespace musicPlayer
 {
-    public class MusicFile
+    public class MusicFile : INotifyPropertyChanged
     {
         public string? Title { get; set; }
         public TimeSpan Duration { get; set; }
         public string? FullPath { get; set; }
+
+        private bool isSearchMatch;
+        public bool IsSearchMatch
+        {
+            get { return isSearchMatch; }
+            set
+            {
+                if (isSearchMatch != value)
+                {
+                    isSearchMatch = value;
+                    OnPropertyChanged(nameof(IsSearchMatch));
+                }
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+        protected virtual void OnPropertyChanged(string propertyName)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
     }
 
     public partial class MainWindow : Window
     {
-        private class LyricLine
-        {
-            public string? Text { get; set; }
-            public TimeSpan Timestamp { get; set; }
-            public TextBlock? Control { get; set; }
-        }
-
+        public AppSettings CurrentSettings { get; set; } = new AppSettings();
         private ObservableCollection<MusicFile> MusicFiles { get; set; }
         private Storyboard? spinningStoryboard;
         private bool isPlaying = false;
         private readonly DispatcherTimer timer;
-        private const string CirclePictureFileName = "circlePicture.txt";
-        private const string BackgroundVideoFileName = "backgroundVideo.txt";
-        private const string MusicPathFileName = "musicPath.txt";
         private bool isHandlingAutoPlay = false;
-        private bool isShuffleMode = false;
         private List<LyricLine> CurrentLyrics = new List<LyricLine>();
         private int CurrentLyricIndex = -1;
+        private LyricsDesktopWindow? lyricsDesktopWindow;
+        private const string SettingsFileName = "setting.json";
+        private bool isShuffleMode = false;
+        private List<MusicFile> searchResults = new List<MusicFile>();
+        private int currentSearchIndex = -1;
 
         public MainWindow()
         {
             InitializeComponent();
             MusicFiles = new ObservableCollection<MusicFile>();
+            musicfilesListView.ItemsSource = MusicFiles;
+            LoadSettings();
+            ApplySettings(CurrentSettings);
             musicfilesListView.ItemsSource = MusicFiles; // Bind the ListView to the ObservableCollection
             spinningStoryboard = this.FindResource("SpinningAnimation") as Storyboard;
 
@@ -58,24 +79,6 @@ namespace musicPlayer
             timer.Interval = TimeSpan.FromMilliseconds(50);
             timer.Tick += timer_Tick;
             UpdateShuffleButtonContent();
-
-            string? savedMusicPath = LoadPathFromFile(MusicPathFileName); // Load saved music path
-            if (!string.IsNullOrEmpty(savedMusicPath))
-            {
-                LoadMusicFiles(savedMusicPath);
-            }
-
-            string? savedCircleImagePath = LoadPathFromFile(CirclePictureFileName); // Load saved circle picture path
-            if (!string.IsNullOrEmpty(savedCircleImagePath))
-            {
-                LoadAlbumCover(savedCircleImagePath);
-            }
-
-            string? savedVideoPath = LoadPathFromFile(BackgroundVideoFileName); // Load saved background video path
-            if (!string.IsNullOrEmpty(savedVideoPath))
-            {
-                LoadBackgroundVideo(savedVideoPath);
-            }
 
             string lrcDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lrc");
             if (!Directory.Exists(lrcDirectory))
@@ -89,6 +92,211 @@ namespace musicPlayer
                     System.Diagnostics.Debug.WriteLine($"Failed to create LRC directory: {ex.Message}");
                 }
             }
+
+            this.Closed += MainWindow_Closed;
+        }
+
+        private void MainWindow_Closed(object? sender, EventArgs e)
+        {
+            if (lyricsDesktopWindow != null)
+            {
+                if (lyricsDesktopWindow.Dispatcher.CheckAccess())
+                {
+                    lyricsDesktopWindow.Close();
+                }
+                else
+                {
+                    lyricsDesktopWindow.Dispatcher.Invoke(() => lyricsDesktopWindow.Close());
+                }
+                lyricsDesktopWindow = null;
+            }
+
+            timer.Stop();
+        }
+
+        private void txtSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter) return;
+
+            string searchText = txtSearch.Text.Trim();
+
+            if (string.IsNullOrEmpty(searchText))
+            {
+                ResetSearchState();
+                return;
+            }
+
+            bool shouldRerunSearch = true;
+
+            if (currentSearchIndex >= 0 && currentSearchIndex < searchResults.Count)
+            {
+                var currentSong = searchResults[currentSearchIndex];
+
+                if (currentSong.Title is not null &&
+                    currentSong.Title.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    shouldRerunSearch = false;
+                }
+            }
+
+            if (shouldRerunSearch)
+            {
+                ResetSearchState();
+
+                searchResults = MusicFiles
+                    .Where(m => m.Title is not null && m.Title.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToList();
+
+                if (searchResults.Count == 0)
+                {
+                    System.Windows.MessageBox.Show("未找到匹配的歌曲。", "搜索结果", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+                currentSearchIndex = 0;
+            }
+            else
+            {
+                searchResults[currentSearchIndex].IsSearchMatch = false;
+
+                currentSearchIndex = (currentSearchIndex + 1) % searchResults.Count;
+            }
+
+            if (currentSearchIndex >= 0)
+            {
+                var targetSong = searchResults[currentSearchIndex];
+
+                targetSong.IsSearchMatch = true;
+
+                musicfilesListView.SelectedItem = targetSong;
+                musicfilesListView.ScrollIntoView(targetSong);
+            }
+        }
+
+        private void ResetSearchState()
+        {
+            foreach (var item in searchResults)
+            {
+                item.IsSearchMatch = false;
+            }
+            searchResults.Clear();
+            currentSearchIndex = -1;
+        }
+
+        private void ShowDesktopLyricsWindow()
+        {
+            if (lyricsDesktopWindow == null)
+            {
+                lyricsDesktopWindow = new LyricsDesktopWindow();
+            }
+
+            if (!lyricsDesktopWindow.IsVisible)
+            {
+                lyricsDesktopWindow.Show();
+            }
+
+            lyricsDesktopWindow.LoadLyrics(CurrentLyrics);
+
+            var btn = this.FindName("btnToggleLyrics") as System.Windows.Controls.Button;
+            if (btn != null && btn.Content is System.Windows.Controls.TextBlock textBlock)
+            {
+                textBlock.Foreground = System.Windows.Media.Brushes.Yellow;
+            }
+        }
+
+        private void LoadSettings()
+        {
+            if (System.IO.File.Exists(SettingsFileName))
+            {
+                try
+                {
+                    string jsonString = System.IO.File.ReadAllText(SettingsFileName);
+                    CurrentSettings = JsonSerializer.Deserialize<AppSettings>(jsonString)
+                                    ?? new AppSettings();
+                }
+                catch (Exception ex)
+                {
+                    System.Windows.MessageBox.Show($"加载设置文件失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                    CurrentSettings = new AppSettings();
+                    SaveSettings();
+                }
+            }
+            else
+            {
+                CurrentSettings = new AppSettings();
+                SaveSettings();
+            }
+        }
+
+        public void SaveSettings()
+        {
+            try
+            {
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                string jsonString = JsonSerializer.Serialize(CurrentSettings, options);
+                System.IO.File.WriteAllText(SettingsFileName, jsonString);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"保存设置文件失败: {ex.Message}");
+            }
+        }
+
+        private void ApplySettings(AppSettings settings)
+        {
+            if (!string.IsNullOrEmpty(settings.MusicPathFileName) && Directory.Exists(settings.MusicPathFileName))
+            {
+                LoadMusicFiles(settings.MusicPathFileName);
+            }
+
+            isShuffleMode = settings.IsShuffleMode;
+            UpdateShuffleButtonContent();
+
+            if (!string.IsNullOrEmpty(settings.CirclePictureFileName))
+            {
+                LoadAlbumCover(settings.CirclePictureFileName);
+            }
+
+            if (!string.IsNullOrEmpty(settings.BackgroundVideoFileName))
+            {
+                LoadBackgroundVideo(settings.BackgroundVideoFileName);
+            }
+
+            if (settings.IsDesktopLyricsVisible)
+            {
+                ShowDesktopLyricsWindow();
+            }
+        }
+
+        private void btnToggleLyrics_Click(object sender, RoutedEventArgs e)
+        {
+            var btn = (System.Windows.Controls.Button)sender;
+            var textBlock = (System.Windows.Controls.TextBlock)btn.Content;
+
+            bool willBeVisible;
+
+            if (lyricsDesktopWindow == null)
+            {
+                lyricsDesktopWindow = new LyricsDesktopWindow();
+                lyricsDesktopWindow.Show();
+                lyricsDesktopWindow.LoadLyrics(CurrentLyrics);
+                textBlock.Foreground = System.Windows.Media.Brushes.Yellow;
+                willBeVisible = true;
+            }
+            else if (lyricsDesktopWindow.IsVisible)
+            {
+                lyricsDesktopWindow.Hide();
+                textBlock.Foreground = System.Windows.Media.Brushes.White;
+                willBeVisible = false;
+            }
+            else
+            {
+                lyricsDesktopWindow.Show();
+                textBlock.Foreground = System.Windows.Media.Brushes.Yellow;
+                willBeVisible = true;
+            }
+
+            CurrentSettings.IsDesktopLyricsVisible = willBeVisible;
+            SaveSettings();
         }
 
         private void UpdateLyricsDisplay()
@@ -130,22 +338,34 @@ namespace musicPlayer
             if (CurrentLyrics.Count <= 1 || mediaPlayer.Source == null) return;
 
             TimeSpan currentPosition = mediaPlayer.Position;
-            int nextIndex = -1;
-
-            for (int i = CurrentLyricIndex + 1; i < CurrentLyrics.Count; i++)
+            int targetIndex = -1;
+            for (int i = 0; i < CurrentLyrics.Count; i++)
             {
-                if (currentPosition >= CurrentLyrics[i].Timestamp)
+                if (currentPosition < CurrentLyrics[i].Timestamp)
                 {
-                    continue;
+                    targetIndex = i - 1;
+                    break;
                 }
-
-                nextIndex = i;
-                break;
             }
 
-            int targetIndex = (nextIndex == -1) ? CurrentLyrics.Count - 1 : nextIndex - 1;
+            if (targetIndex == -1)
+            {
+                if (currentPosition >= CurrentLyrics[CurrentLyrics.Count - 1].Timestamp)
+                {
+                    targetIndex = CurrentLyrics.Count - 1;
+                }
+                else
+                {
+                    targetIndex = 0;
+                }
+            }
 
-            if (targetIndex != CurrentLyricIndex && targetIndex >= 0)
+            if (targetIndex < 0)
+            {
+                targetIndex = 0;
+            }
+
+            if (targetIndex != CurrentLyricIndex)
             {
                 if (CurrentLyricIndex >= 0 && CurrentLyricIndex < CurrentLyrics.Count)
                 {
@@ -168,7 +388,6 @@ namespace musicPlayer
                         System.Windows.Point lyricPosition = newLyric.TranslatePoint(new System.Windows.Point(0, 0), LyricsPanel);
 
                         double viewportHeight = LyricsScrollViewer.ViewportHeight;
-
                         double lyricHeight = newLyric.ActualHeight;
 
                         double targetOffset = lyricPosition.Y - (viewportHeight / 2.0) + (lyricHeight / 2.0);
@@ -198,24 +417,39 @@ namespace musicPlayer
             try
             {
                 string[] lines = System.IO.File.ReadAllLines(lrcFilePath);
+                var lineRegex = new Regex(@"\[(\d+):(\d{2})(\.(\d+))?\](.*)", RegexOptions.Compiled);
 
                 foreach (string line in lines)
                 {
-                    var match = Regex.Match(line, @"\[(\d{1,2}):(\d{2})\.(\d{2,3})\](.*)");
-
-                    if (match.Success)
+                    if (line.StartsWith("[") && !lineRegex.IsMatch(line))
                     {
-                        int minutes = int.Parse(match.Groups[1].Value);
-                        int seconds = int.Parse(match.Groups[2].Value);
-                        string millisecondsString = match.Groups[3].Value.PadRight(3, '0');
-                        int milliseconds = int.Parse(millisecondsString);
+                        continue;
+                    }
 
-                        TimeSpan timestamp = new TimeSpan(0, 0, minutes, seconds, milliseconds);
-                        string text = match.Groups[4].Value.Trim();
+                    var matches = lineRegex.Matches(line);
 
-                        if (!string.IsNullOrEmpty(text))
+                    foreach (Match match in matches)
+                    {
+                        if (match.Success)
                         {
-                            lyrics.Add(new LyricLine { Text = text, Timestamp = timestamp });
+                            int minutes = int.Parse(match.Groups[1].Value);
+                            int seconds = int.Parse(match.Groups[2].Value);
+
+                            string rawMillisecondsString = match.Groups[4].Success ? match.Groups[4].Value : "0";
+                            string text = match.Groups[5].Value.Trim();
+
+                            string normalizedMillisecondsString = rawMillisecondsString.PadRight(3, '0');
+
+                            normalizedMillisecondsString = normalizedMillisecondsString.Substring(0, 3);
+
+                            int milliseconds = int.Parse(normalizedMillisecondsString);
+
+                            TimeSpan timestamp = new TimeSpan(0, 0, minutes, seconds, milliseconds);
+
+                            if (!string.IsNullOrEmpty(text))
+                            {
+                                lyrics.Add(new LyricLine { Text = text, Timestamp = timestamp });
+                            }
                         }
                     }
                 }
@@ -278,45 +512,6 @@ namespace musicPlayer
             }
         }
 
-        private void SavePathToFile(string fileName, string filePath)
-        {
-            try
-            {
-                string directory = AppDomain.CurrentDomain.BaseDirectory;
-                string fullPath = Path.Combine(directory, fileName);
-                System.IO.File.WriteAllText(fullPath, filePath);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"保存路径到文件 {fileName} 失败: {ex.Message}");
-            }
-        }
-
-        private string? LoadPathFromFile(string fileName)
-        {
-            try
-            {
-                string directory = AppDomain.CurrentDomain.BaseDirectory;
-                string fullPath = Path.Combine(directory, fileName);
-
-                if (System.IO.File.Exists(fullPath))
-                {
-                    string content = System.IO.File.ReadAllText(fullPath).Trim();
-                    return string.IsNullOrWhiteSpace(content) ? null : content;
-                }
-                else
-                {
-                    System.IO.File.Create(fullPath).Dispose();
-                    return null;
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"加载路径从文件 {fileName} 失败: {ex.Message}");
-                return null;
-            }
-        }
-
         private void LoadAlbumCover(string filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return;
@@ -339,7 +534,13 @@ namespace musicPlayer
             {
                 sliderProgress.Value = mediaPlayer.Position.TotalSeconds;
                 txtCurrentTime.Text = mediaPlayer.Position.ToString(@"mm\:ss");
+
                 CheckAndUpdateLyrics();
+
+                if (lyricsDesktopWindow != null && lyricsDesktopWindow.IsVisible)
+                {
+                    lyricsDesktopWindow.UpdatePosition(mediaPlayer.Position);
+                }
             }
         }
 
@@ -407,7 +608,8 @@ namespace musicPlayer
 
                     if (MusicFiles.Count > 0)
                     {
-                        SavePathToFile(MusicPathFileName, selectedPath);
+                        CurrentSettings.MusicPathFileName = selectedPath;
+                        SaveSettings();
                     }
                 }
             }
@@ -448,9 +650,7 @@ namespace musicPlayer
                 {
                     TagLib.File file = TagLib.File.Create(filePath);
 
-                    string title = string.IsNullOrWhiteSpace(file.Tag.Title)
-                                   ? Path.GetFileNameWithoutExtension(filePath)
-                                   : file.Tag.Title;
+                    string title = Path.GetFileNameWithoutExtension(filePath);
 
                     MusicFiles.Add(new MusicFile
                     {
@@ -491,6 +691,11 @@ namespace musicPlayer
                 mediaPlayer.Source = new Uri(filePath);
                 mediaPlayer.Play();
                 LoadLyricsForCurrentSong(filePath);
+
+                if (lyricsDesktopWindow != null)
+                {
+                    lyricsDesktopWindow.LoadLyrics(CurrentLyrics);
+                }
 
                 if (spinningStoryboard != null) spinningStoryboard.Begin(VisualizerGrid, true);
                 timer.Start();
@@ -583,7 +788,8 @@ namespace musicPlayer
 
                 LoadAlbumCover(selectedImagePath);
 
-                SavePathToFile(CirclePictureFileName, selectedImagePath);
+                CurrentSettings.CirclePictureFileName = selectedImagePath;
+                SaveSettings();
             }
         }
 
@@ -599,7 +805,8 @@ namespace musicPlayer
 
                 LoadBackgroundVideo(selectedVideoPath);
 
-                SavePathToFile(BackgroundVideoFileName, selectedVideoPath);
+                CurrentSettings.BackgroundVideoFileName = selectedVideoPath;
+                SaveSettings();
             }
         }
 
@@ -706,6 +913,10 @@ namespace musicPlayer
         private void btnShuffleToggle_Click(object sender, RoutedEventArgs e)
         {
             isShuffleMode = !isShuffleMode;
+
+            CurrentSettings.IsShuffleMode = isShuffleMode;
+            SaveSettings();
+
             UpdateShuffleButtonContent();
         }
     }
