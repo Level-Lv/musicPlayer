@@ -61,6 +61,7 @@ namespace musicPlayer
         private bool isShuffleMode = false;
         private List<MusicFile> searchResults = new List<MusicFile>();
         private int currentSearchIndex = -1;
+        private bool _isDragging = false;
 
         public MainWindow()
         {
@@ -521,26 +522,22 @@ namespace musicPlayer
                 BitmapImage newImage = new BitmapImage(new Uri(filePath, UriKind.Absolute));
                 AlbumCoverBrush.ImageSource = newImage;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                System.Windows.MessageBox.Show($"加载图片失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 AlbumCoverBrush.ImageSource = null;
             }
         }
 
-        private void timer_Tick(object? sender, EventArgs e)
+        private void timer_Tick(object sender, EventArgs e)
         {
-            if (mediaPlayer.Source != null && mediaPlayer.NaturalDuration.HasTimeSpan)
+            if (!_isDragging && mediaPlayer.NaturalDuration.HasTimeSpan)
             {
                 sliderProgress.Value = mediaPlayer.Position.TotalSeconds;
                 txtCurrentTime.Text = mediaPlayer.Position.ToString(@"mm\:ss");
 
                 CheckAndUpdateLyrics();
 
-                if (lyricsDesktopWindow != null && lyricsDesktopWindow.IsVisible)
-                {
-                    lyricsDesktopWindow.UpdatePosition(mediaPlayer.Position);
-                }
+                lyricsDesktopWindow?.UpdatePosition(mediaPlayer.Position);
             }
         }
 
@@ -819,9 +816,8 @@ namespace musicPlayer
 
                 backgroundVideo.Play();
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                System.Windows.MessageBox.Show($"加载背景视频失败: {ex.Message}", "视频错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 backgroundVideo.Source = null;
             }
         }
@@ -918,6 +914,26 @@ namespace musicPlayer
             SaveSettings();
 
             UpdateShuffleButtonContent();
+        }
+
+        private void sliderProgress_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
+        {
+            _isDragging = true;
+        }
+
+        private void sliderProgress_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+        {
+            _isDragging = false;
+            mediaPlayer.Position = TimeSpan.FromSeconds(sliderProgress.Value);
+        }
+
+        private void sliderProgress_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_isDragging && mediaPlayer.NaturalDuration.HasTimeSpan)
+            {
+                double seconds = e.NewValue / 100.0 * mediaPlayer.NaturalDuration.TimeSpan.TotalSeconds;
+                txtCurrentTime.Text = TimeSpan.FromSeconds(seconds).ToString(@"mm\:ss");
+            }
         }
     }
 }

@@ -48,7 +48,7 @@ namespace musicPlayer
 
         public void UpdatePosition(TimeSpan currentPosition)
         {
-            if (LyricsData.Count <= 1) return;
+            if (LyricsData == null || LyricsData.Count == 0) return;
 
             int targetIndex = -1;
 
@@ -61,8 +61,12 @@ namespace musicPlayer
                 }
             }
 
+            if (targetIndex == -1 && currentPosition >= LyricsData.Last().Timestamp)
+            {
+                targetIndex = LyricsData.Count - 1;
+            }
+
             if (targetIndex < 0) targetIndex = 0;
-            if (targetIndex >= LyricsData.Count) targetIndex = LyricsData.Count - 1;
 
             if (targetIndex != CurrentLineIndex)
             {
@@ -75,30 +79,31 @@ namespace musicPlayer
         {
             DesktopLyricsPanel.Children.Clear();
 
+            Style highlightStyle = (Style)this.FindResource("HighlightLyricTextBlockStyle");
+            Style normalStyle = (Style)this.FindResource("NormalLyricTextBlockStyle");
+
+            if (LyricsData == null || LyricsData.Count == 0)
+            {
+                DesktopLyricsPanel.Children.Add(CreateLyricTextBlock("等待播放...", normalStyle, false));
+                return;
+            }
+
             if (highlightIndex >= 0 && highlightIndex < LyricsData.Count)
             {
-                Style highlightStyle = (Style)this.FindResource("HighlightLyricTextBlockStyle");
                 TextBlock currentTb = CreateLyricTextBlock(LyricsData[highlightIndex].Text, highlightStyle, true);
                 DesktopLyricsPanel.Children.Add(currentTb);
             }
 
             int nextIndex = highlightIndex + 1;
+
             if (nextIndex < LyricsData.Count)
             {
-                Style normalStyle = (Style)this.FindResource("NormalLyricTextBlockStyle");
                 TextBlock nextTb = CreateLyricTextBlock(LyricsData[nextIndex].Text, normalStyle, false);
                 DesktopLyricsPanel.Children.Add(nextTb);
             }
-            else if (highlightIndex == LyricsData.Count - 1 && LyricsData.Count > 0)
-            {
-                Style normalStyle = (Style)this.FindResource("NormalLyricTextBlockStyle");
-                TextBlock emptyTb = CreateLyricTextBlock("~ 歌曲播放完毕 ~", normalStyle, false);
-                emptyTb.Opacity = 0.5;
-                DesktopLyricsPanel.Children.Add(emptyTb);
-            }
         }
 
-        
+
         private TextBlock CreateLyricTextBlock(string? text, Style style, bool isHighlighted)
         {
             var tb = new TextBlock

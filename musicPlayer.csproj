@@ -7,18 +7,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
 	<UseWindowsForms>true</UseWindowsForms>
+	<ApplicationIcon>musicNote.ico</ApplicationIcon>
   </PropertyGroup>
-	
-  <ItemGroup>
-    <None Remove="musicNote.ico" />
-  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="taglib-sharp-netstandard2.0" Version="2.1.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Resource Include="musicNote.ico" />
   </ItemGroup>
 
 </Project>

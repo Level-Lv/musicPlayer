@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:musicPlayer"
         mc:Ignorable="d"
         Title="音乐播放器" Height="600" Width="1000"
-        Icon="/musicNote.ico">        
+        >        
     
     <Window.Resources>
         <Storyboard x:Key="SpinningAnimation" x:Name="SpinningStoryboard">
@@ -258,13 +258,13 @@
             </ScrollViewer>
 
             <Slider x:Name="sliderProgress"
-            Grid.Row="1" Grid.ColumnSpan="2"
-            Margin="10, 5"
-            IsMoveToPointEnabled="True"
-            Minimum="0"
-            Maximum="100"
-            Value="0"
-            PreviewMouseUp="sliderProgress_PreviewMouseUp" />
+                Minimum="0"
+                Value="0"
+                Grid.Row="1" Grid.ColumnSpan="2"
+                IsMoveToPointEnabled="True"
+                Thumb.DragStarted="sliderProgress_DragStarted" 
+                Thumb.DragCompleted="sliderProgress_DragCompleted"
+                PreviewMouseUp="sliderProgress_PreviewMouseUp" />
 
             <Grid Grid.Row="2" Grid.ColumnSpan="2" Margin="10, 0">
                 <TextBlock x:Name="txtCurrentTime" Text="00:00" Foreground="LightGray" HorizontalAlignment="Left" />

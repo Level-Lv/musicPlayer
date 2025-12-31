@@ -22,6 +22,7 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        
         <Style x:Key="HighlightLyricTextBlockStyle" TargetType="TextBlock" BasedOn="{StaticResource NormalLyricTextBlockStyle}">
             <Setter Property="FontSize" Value="32"/>
             <Setter Property="FontWeight" Value="Bold"/>
