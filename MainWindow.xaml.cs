@@ -115,6 +115,36 @@ namespace musicPlayer
             timer.Stop();
         }
 
+        private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            // if searching, do not react to key presses
+            if (Keyboard.FocusedElement is System.Windows.Controls.TextBox)
+            {
+                return; 
+            }
+
+            // Space key to play/pause
+            if (e.Key == System.Windows.Input.Key.Space)
+            {
+                btnPlayPause_Click(null, new RoutedEventArgs());
+                e.Handled = true;
+            }
+
+            // Ctrl + F to search next
+            bool isCtrlDown = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+            if (e.Key == System.Windows.Input.Key.F && isCtrlDown)
+            {
+                btnNext_Click(null, new RoutedEventArgs());
+                e.Handled = true;
+            }
+
+            if (e.Key == System.Windows.Input.Key.B && isCtrlDown)
+            {
+                btnPrevious_Click(null, new RoutedEventArgs());
+                e.Handled = true;
+            }
+        }
+
         private void txtSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key != Key.Enter) return;
@@ -265,6 +295,26 @@ namespace musicPlayer
             if (settings.IsDesktopLyricsVisible)
             {
                 ShowDesktopLyricsWindow();
+            }
+
+            if (!string.IsNullOrEmpty(settings.LastOneSong) && System.IO.File.Exists(settings.LastOneSong))
+            {
+                var lastSong = MusicFiles.FirstOrDefault(m => m.FullPath == settings.LastOneSong);
+                if (lastSong != null)
+                {
+                    musicfilesListView.SelectedItem = lastSong;
+                    musicfilesListView.ScrollIntoView(lastSong);
+
+                    mediaPlayer.Source = new Uri(lastSong.FullPath);
+
+                    mediaPlayer.Pause();
+
+                    LoadLyricsForCurrentSong(lastSong.FullPath);
+                    this.Title = $"已就绪: {lastSong.Title} - 音乐播放器";
+
+                    isPlaying = false;
+                    btnPlayPause.Content = "▶️";
+                }
             }
         }
 
@@ -688,6 +738,8 @@ namespace musicPlayer
                 mediaPlayer.Source = new Uri(filePath);
                 mediaPlayer.Play();
                 LoadLyricsForCurrentSong(filePath);
+                CurrentSettings.LastOneSong = filePath;
+                SaveSettings();
 
                 if (lyricsDesktopWindow != null)
                 {

@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:musicPlayer"
         mc:Ignorable="d"
         Title="音乐播放器" Height="600" Width="1000"
-        >        
+        PreviewKeyDown="Window_PreviewKeyDown">        
     
     <Window.Resources>
         <Storyboard x:Key="SpinningAnimation" x:Name="SpinningStoryboard">
@@ -279,7 +279,7 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <Button x:Name="btnPlayPause" Content="▶️" Padding="8,4" Margin="5" Background="Transparent" Click="btnPlayPause_Click" />
+                    <Button x:Name="btnPlayPause" Content="▶️" Padding="8,4" Margin="5" Background="Transparent" Click="btnPlayPause_Click" ToolTip="播放/暂停(Space)"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -287,13 +287,14 @@
                     Content="🔀"
                     Padding="8,4"
                     Margin="0, 0, 30, 0" Background="Transparent"
-                    Click="btnShuffleToggle_Click" />
-                    <Button x:Name="btnPrevious" Content="⏮️" Padding="8,4" Margin="5" Background="Transparent" Click="btnPrevious_Click" />
+                    Click="btnShuffleToggle_Click"
+                    ToolTip="顺序/随机" />
+                    <Button x:Name="btnPrevious" Content="⏮️" Padding="8,4" Margin="5" Background="Transparent" Click="btnPrevious_Click" ToolTip="上一首(Ctrl+B)"/>
                 </StackPanel>
 
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                    <Button x:Name="btnNext" Content="⏭️" Padding="8,4" Margin="5" Background="Transparent" Click="btnNext_Click" />
+                    <Button x:Name="btnNext" Content="⏭️" Padding="8,4" Margin="5" Background="Transparent" Click="btnNext_Click" ToolTip="下一首(Ctrl+F)"/>
 
                     <Button Width="{Binding ElementName=btnShuffleToggle, Path=ActualWidth}"
                     Height="{Binding ElementName=btnShuffleToggle, Path=ActualHeight}"

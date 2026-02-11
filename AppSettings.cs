@@ -11,5 +11,6 @@
         public bool IsShuffleMode { get; set; } = false;
 
         public bool IsDesktopLyricsVisible { get; set; } = true;
+        public string? LastOneSong { get; set; }
     }
 }
