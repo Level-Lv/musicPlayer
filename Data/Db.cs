@@ -189,8 +189,9 @@ namespace musicPlayer.Data
                 SetSetting("legacy_settings_migrated", "1");
 
                 // 改名留底，避免下次重复迁移
+                // （File.Replace 要求目标文件已存在，首次运行 .bak 不存在会抛异常，故用 Move）
                 string backup = legacyFile + ".bak";
-                File.Replace(legacyFile, backup, null);
+                File.Move(legacyFile, backup, overwrite: true);
             }
             catch (Exception ex)
             {

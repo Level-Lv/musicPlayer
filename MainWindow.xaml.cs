@@ -170,6 +170,10 @@ namespace musicPlayer
         /// <summary>把当前音量值反映到播放引擎。</summary>
         private void ApplyVolume()
         {
+            // XAML 加载过程中滑块 Value 一赋初值就会触发 ValueChanged，
+            // 此时 mediaPlayer 元素尚未创建，直接跳过（启动后 ApplyStartupSettings 会再正确设一次）
+            if (mediaPlayer == null) return;
+
             mediaPlayer.Volume = sliderVolume.Value / 100.0;
             mediaPlayer.IsMuted = isMuted;
         }
