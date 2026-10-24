@@ -710,7 +710,7 @@ namespace musicPlayer
         }
 
         /// <summary>从当前歌单移除选中歌曲（只解除关联）。</summary>
-        private void menuRemoveFromPlaylist_Click(object sender, RoutedEventArgs e)
+        private void menuRemoveFromPlaylist_Click(object? sender, RoutedEventArgs e)
         {
             if (currentPlaylistId == 0) return;
 
@@ -911,9 +911,9 @@ namespace musicPlayer
             PlayTrack(next);
         }
 
-        private void btnNext_Click(object sender, RoutedEventArgs e) => AdvanceToNext(manual: true);
+        private void btnNext_Click(object? sender, RoutedEventArgs e) => AdvanceToNext(manual: true);
 
-        private void btnPrevious_Click(object sender, RoutedEventArgs e)
+        private void btnPrevious_Click(object? sender, RoutedEventArgs e)
         {
             if (VisibleTracks.Count == 0) return;
 
@@ -928,6 +928,8 @@ namespace musicPlayer
                 int prevIndex = (idx <= 0 ? VisibleTracks.Count : idx) - 1; // 回环
                 prev = VisibleTracks[prevIndex];
             }
+
+            if (prev == null) return;
 
             musicfilesListView.SelectedItem = prev;
             musicfilesListView.ScrollIntoView(prev);
@@ -1090,7 +1092,7 @@ namespace musicPlayer
             }
         }
 
-        private void btnMute_Click(object sender, RoutedEventArgs e)
+        private void btnMute_Click(object? sender, RoutedEventArgs e)
         {
             isMuted = !isMuted;
             ApplyVolume();
@@ -1273,7 +1275,7 @@ namespace musicPlayer
             }
         }
 
-        private void btnToggleLyrics_Click(object sender, RoutedEventArgs e)
+        private void btnToggleLyrics_Click(object? sender, RoutedEventArgs e)
         {
             bool willBeVisible;
 
