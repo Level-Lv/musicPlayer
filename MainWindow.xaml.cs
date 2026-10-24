@@ -1396,9 +1396,44 @@ namespace musicPlayer
 
         private void btnSettings_Click(object sender, RoutedEventArgs e)
         {
-            // TODO(步骤 8): 打开 SettingsWindow 设置弹窗
-            MessageBox.Show("设置窗口将在下一步骤（8）实现。",
-                "设置", MessageBoxButton.OK, MessageBoxImage.Information);
+            var settings = new SettingsWindow(this) { Owner = this };
+            settings.ShowDialog();
+        }
+
+        /// <summary>设置弹窗：库扫描（或新文件夹入库）完成后刷新歌曲列表缓存。</summary>
+        public void ReloadAfterLibraryScan()
+        {
+            LoadLibraryCache();
+            RefreshVisibleTracks();
+            UpdatePlayingMarkers();
+        }
+
+        /// <summary>设置弹窗：歌词文件夹变更后，重新加载当前歌曲的歌词。</summary>
+        public void ReloadCurrentLyrics()
+        {
+            if (currentTrack != null)
+                LoadLyricsForCurrentSong(currentTrack.FullPath);
+        }
+
+        /// <summary>设置弹窗：播放方式变更（sequential / shuffle / repeat_one）。</summary>
+        public void ApplyPlayModeFromSettings(string mode)
+        {
+            playMode = mode switch
+            {
+                "shuffle" => PlayMode.Shuffle,
+                "repeat_one" => PlayMode.RepeatOne,
+                _ => PlayMode.Sequential
+            };
+            UpdatePlayModeButton();
+        }
+
+        /// <summary>设置弹窗：默认音量变更。</summary>
+        public void SetVolumeFromSettings(int volume)
+        {
+            suppressVolumePersist = true; // 值本来就来自数据库，不要再写回去
+            sliderVolume.Value = Math.Clamp(volume, 0, 100);
+            suppressVolumePersist = false;
+            ApplyVolume();
         }
 
         #endregion

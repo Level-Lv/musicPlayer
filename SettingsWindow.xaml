@@ -1,0 +1,232 @@
+<Window x:Class="musicPlayer.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="设置" Height="640" Width="560"
+        MinHeight="520" MinWidth="480"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF14141C"
+        ResizeMode="CanResize">
+
+    <Window.Resources>
+        <!-- 分区标题样式 -->
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="#FFD700"/>
+            <Setter Property="Margin" Value="0,18,0,8"/>
+        </Style>
+
+        <!-- 普通说明文字 -->
+        <Style x:Key="HintText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Foreground" Value="#99AAAAAA"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <!-- 统一按钮样式 -->
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#332A2A38"/>
+            <Setter Property="Foreground" Value="#DDDDDD"/>
+            <Setter Property="BorderBrush" Value="#55444455"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="MinWidth" Value="76"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#553A3A4C"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#88FFD700"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#55666666"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 统一文本框/下拉框样式 -->
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#22111118"/>
+            <Setter Property="Foreground" Value="#DDDDDD"/>
+            <Setter Property="BorderBrush" Value="#55444455"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="6,4"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#332A2A38"/>
+            <Setter Property="Foreground" Value="#DDDDDD"/>
+            <Setter Property="Padding" Value="8,4"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="20,12,20,12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 可滚动的设置主体 -->
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+
+            <StackPanel>
+
+                <!-- ============ 1. 音乐文件夹 ============ -->
+                <TextBlock Text="🎵 音乐文件夹" Style="{StaticResource SectionHeader}"/>
+                <TextBlock Text="支持添加多个文件夹，扫描时递归子目录（mp3 / flac / wav / m4a）。"
+                           Style="{StaticResource HintText}" Margin="0,0,0,6"/>
+                <ListBox x:Name="listFolders" Height="120"
+                         Background="#22111118" BorderBrush="#55444455" BorderThickness="1"
+                         Foreground="#DDDDDD" ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+                <WrapPanel Margin="0,8,0,0">
+                    <Button x:Name="btnAddFolder" Content="添加文件夹…" Click="btnAddFolder_Click" Margin="0,0,8,0"/>
+                    <Button x:Name="btnRemoveFolder" Content="移除选中" Click="btnRemoveFolder_Click" Margin="0,0,8,0"/>
+                    <Button x:Name="btnRescan" Content="重新扫描全部" Click="btnRescan_Click"/>
+                </WrapPanel>
+
+                <!-- 扫描进度（扫描时才显示） -->
+                <StackPanel x:Name="panelScanProgress" Visibility="Collapsed" Margin="0,10,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <ProgressBar x:Name="progressScan" Height="6" Minimum="0" Maximum="100"
+                                     Foreground="#FFD700" Background="#22111118"
+                                     BorderThickness="0"/>
+                        <Button Grid.Column="1" Content="取消" Click="btnCancelScan_Click"
+                                Margin="10,0,0,0" Padding="8,2" MinWidth="52"/>
+                    </Grid>
+                    <TextBlock x:Name="txtScanStatus" Style="{StaticResource HintText}" Margin="0,5,0,0"/>
+                </StackPanel>
+
+                <!-- ============ 2. 歌词文件夹 ============ -->
+                <TextBlock Text="📝 歌词文件夹" Style="{StaticResource SectionHeader}"/>
+                <TextBlock Text="播放时自动在该文件夹（含子目录）里查找与歌曲同名的 .lrc 文件。"
+                           Style="{StaticResource HintText}" Margin="0,0,0,6"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="txtLyricsFolder" IsReadOnly="True"/>
+                    <Button Grid.Column="1" Content="选择…" Click="btnPickLyricsFolder_Click" Margin="8,0,0,0"/>
+                    <Button Grid.Column="2" Content="清除" Click="btnClearLyricsFolder_Click" Margin="8,0,0,0"/>
+                </Grid>
+
+                <!-- ============ 3. 背景 ============ -->
+                <TextBlock Text="🖼 背景" Style="{StaticResource SectionHeader}"/>
+                <TextBlock Text="支持图片（jpg / png / bmp / gif）或视频（mp4 / webm），铺满整个窗口。"
+                           Style="{StaticResource HintText}" Margin="0,0,0,6"/>
+                <WrapPanel>
+                    <Button Content="选择图片…" Click="btnPickBgImage_Click" Margin="0,0,8,0"/>
+                    <Button Content="选择视频…" Click="btnPickBgVideo_Click" Margin="0,0,8,0"/>
+                    <Button Content="清除背景" Click="btnClearBg_Click"/>
+                </WrapPanel>
+                <TextBox x:Name="txtBackground" IsReadOnly="True" Margin="0,8,0,0"/>
+
+                <!-- ============ 4. 播放设置 ============ -->
+                <TextBlock Text="▶ 播放设置" Style="{StaticResource SectionHeader}"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Text="播放方式：" Foreground="#DDDDDD" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="cmbPlayMode" Grid.Column="1" Width="160"
+                              HorizontalAlignment="Left"
+                              SelectionChanged="cmbPlayMode_SelectionChanged">
+                        <ComboBoxItem Content="顺序播放" Tag="sequential"/>
+                        <ComboBoxItem Content="随机播放" Tag="shuffle"/>
+                        <ComboBoxItem Content="单曲循环" Tag="repeat_one"/>
+                    </ComboBox>
+
+                    <TextBlock Grid.Row="1" Text="默认音量：" Foreground="#DDDDDD"
+                               VerticalAlignment="Center" Margin="0,12,8,0"/>
+                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,12,0,0">
+                        <Slider x:Name="sliderDefaultVolume" Width="200" Minimum="0" Maximum="100"
+                                VerticalAlignment="Center" ValueChanged="sliderDefaultVolume_ValueChanged"/>
+                        <TextBlock x:Name="txtDefaultVolume" Foreground="#DDDDDD"
+                                   VerticalAlignment="Center" Margin="10,0,0,0" Width="36"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- ============ 5. 主题 ============ -->
+                <TextBlock Text="🎨 主题" Style="{StaticResource SectionHeader}"/>
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton Content="暗色" IsChecked="True" Foreground="#DDDDDD" Margin="0,0,16,0"
+                                 GroupName="theme"/>
+                    <RadioButton Content="亮色（开发中）" IsEnabled="False" Foreground="#66666666"
+                                 GroupName="theme"/>
+                </StackPanel>
+
+                <!-- ============ 6. 快捷键 ============ -->
+                <TextBlock Text="⌨ 快捷键" Style="{StaticResource SectionHeader}"/>
+                <Border Background="#22111118" BorderBrush="#55444455" BorderThickness="1"
+                        CornerRadius="4" Padding="12,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="170"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Text="空格" Foreground="#FFD700"/>
+                        <TextBlock Grid.Column="1" Text="播放 / 暂停" Foreground="#CCCCCC"/>
+                        <TextBlock Grid.Row="1" Text="Ctrl + ← / →" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="上一首 / 下一首" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="2" Text="↑ / ↓" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="音量加 / 减" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="3" Text="M" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text="静音切换" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="4" Text="L" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="桌面歌词开关" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="5" Text="Ctrl + F" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="5" Grid.Column="1" Text="聚焦搜索框" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="6" Text="Esc" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="6" Grid.Column="1" Text="清除搜索 / 关闭弹窗" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="7" Text="Delete" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="7" Grid.Column="1" Text="从当前歌单移除选中歌曲" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="8" Text="双击歌词行" Foreground="#FFD700" Margin="0,4,0,0"/>
+                        <TextBlock Grid.Row="8" Grid.Column="1" Text="跳转到该句播放" Foreground="#CCCCCC" Margin="0,4,0,0"/>
+                    </Grid>
+                </Border>
+
+                <!-- ============ 7. 数据位置 ============ -->
+                <TextBlock Text="💾 数据位置" Style="{StaticResource SectionHeader}"/>
+                <TextBlock Text="数据库（歌曲库 / 歌单 / 设置都在这里，删除前请先备份）："
+                           Style="{StaticResource HintText}" Margin="0,0,0,6"/>
+                <TextBox x:Name="txtDbPath" IsReadOnly="True"/>
+                <TextBlock Text="旧版 setting.json 首次启动时会自动迁移进数据库，并改名为 setting.json.bak 留底。"
+                           Style="{StaticResource HintText}" Margin="0,6,0,0"/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- 底部关闭按钮 -->
+        <Button Grid.Row="1" Content="关闭" Click="btnClose_Click"
+                HorizontalAlignment="Right" Margin="0,14,0,0" MinWidth="90"/>
+    </Grid>
+</Window>
