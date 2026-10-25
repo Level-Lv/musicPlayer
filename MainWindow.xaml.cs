@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -20,6 +21,9 @@ using musicPlayer.Services;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using DragEventArgs = System.Windows.DragEventArgs;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+
+// 托盘图标用的 WinForms 类型统一走这个别名，避免和 WPF 类型混淆
+using WinForms = System.Windows.Forms;
 
 namespace musicPlayer
 {
@@ -63,15 +67,11 @@ namespace musicPlayer
 
         private readonly DispatcherTimer timer;
         private bool isDraggingProgress;
-        private Storyboard? spinningStoryboard;
 
         // 歌词状态
         private List<LyricLine> CurrentLyrics = new();
         private int CurrentLyricIndex = -1;
         private LyricsDesktopWindow? lyricsDesktopWindow;
-
-        // MediaElement 的 Stop() 会再次触发 MediaEnded，用这个标记把"主动 Stop 引发的事件"吞掉
-        private bool isHandlingAutoPlay;
 
         // 设置音量时抑制"写库"（启动赋值和程序改值时不需要持久化）
         private bool suppressVolumePersist;
@@ -83,12 +83,14 @@ namespace musicPlayer
         {
             InitializeComponent();
 
+            // Win11 系统级圆角（句柄创建完成后应用；Win10 静默忽略保持方形）
+            SourceInitialized += (_, _) => WindowEffects.ApplyRoundedCorners(this);
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
             musicfilesListView.ItemsSource = VisibleTracks;
             PlaylistsList.ItemsSource = Playlists;
-            spinningStoryboard = FindResource("SpinningAnimation") as Storyboard;
 
             // 音量持久化用的延迟写库定时器（拖动滑块时避免每帧写一次数据库）
             volumePersistTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -109,7 +111,10 @@ namespace musicPlayer
             timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             timer.Tick += timer_Tick;
 
+            this.Closing += MainWindow_Closing;
             this.Closed += MainWindow_Closed;
+
+            InitTrayIcon();
         }
 
         private void MainWindow_Closed(object? sender, EventArgs e)
@@ -123,7 +128,117 @@ namespace musicPlayer
                 lyricsDesktopWindow = null;
             }
             timer.Stop();
+            DisposeTrayIcon();
         }
+
+        // =====================================================================
+        // 关闭行为 + 系统托盘（设置里可选"最小化到托盘"或"直接退出"，默认托盘）
+        // =====================================================================
+
+        private WinForms.NotifyIcon? trayIcon;
+
+        /// <summary>托盘菜单里点"退出"时置 true，让 Closing 放行真正关闭。</summary>
+        private bool isRealExit;
+
+        /// <summary>气泡提示一个会话只弹一次，之后最小化到托盘就安静地藏起来。</summary>
+        private bool trayBalloonShown;
+
+        /// <summary>窗口关闭请求：托盘模式下取消关闭并隐藏到托盘，否则放行。</summary>
+        private void MainWindow_Closing(object? sender, CancelEventArgs e)
+        {
+            if (isRealExit)
+            {
+                DisposeTrayIcon();
+                return;
+            }
+
+            if (Db.GetSetting("close_action", "tray") != "exit")
+            {
+                e.Cancel = true;
+                Hide();
+                if (trayIcon != null) trayIcon.Visible = true;
+
+                if (!trayBalloonShown)
+                {
+                    trayBalloonShown = true;
+                    try
+                    {
+                        trayIcon?.ShowBalloonTip(2000, "音乐播放器",
+                            "已最小化到系统托盘，双击图标恢复窗口。", WinForms.ToolTipIcon.Info);
+                    }
+                    catch
+                    {
+                        // 气泡失败无伤大雅，不影响托盘本身
+                    }
+                }
+            }
+            // close_action == "exit"：走正常关闭流程，Closed 里做收尾
+        }
+
+        /// <summary>创建托盘图标：双击恢复窗口；右键菜单 = 上一首 / 下一首 / 退出。</summary>
+        private void InitTrayIcon()
+        {
+            trayIcon = new WinForms.NotifyIcon
+            {
+                Text = "音乐播放器",
+                Visible = false // 只有关闭到托盘后才显示
+            };
+
+            // 应用图标来自 exe 内嵌的 musicNote.ico
+            try
+            {
+                if (Environment.ProcessPath is string exePath)
+                    trayIcon.Icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+            }
+            catch
+            {
+                // 图标取不到就退化为系统默认图标，不影响功能
+            }
+
+            var menu = new WinForms.ContextMenuStrip();
+            var miPrev = new WinForms.ToolStripMenuItem("上一首");
+            miPrev.Click += (_, _) => PlayPreviousTrack();
+            var miNext = new WinForms.ToolStripMenuItem("下一首");
+            miNext.Click += (_, _) => PlayNextTrack();
+            var miExit = new WinForms.ToolStripMenuItem("退出");
+            miExit.Click += (_, _) => ExitFromTray();
+            menu.Items.AddRange(new WinForms.ToolStripItem[] { miPrev, miNext, new WinForms.ToolStripSeparator(), miExit });
+
+            trayIcon.ContextMenuStrip = menu;
+            trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+        }
+
+        /// <summary>从托盘恢复主窗口并带到前台。</summary>
+        private void RestoreFromTray()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+            Topmost = true;
+            Topmost = false;
+        }
+
+        /// <summary>托盘菜单"退出"：真正退出程序。</summary>
+        private void ExitFromTray()
+        {
+            isRealExit = true;
+            Close();
+            Application.Current.Shutdown();
+        }
+
+        private void DisposeTrayIcon()
+        {
+            if (trayIcon == null) return;
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
+            trayIcon = null;
+        }
+
+        /// <summary>托盘菜单 / 外部调用：切上一首。</summary>
+        public void PlayPreviousTrack() => btnPrevious_Click(null, new RoutedEventArgs());
+
+        /// <summary>托盘菜单 / 外部调用：切下一首。</summary>
+        public void PlayNextTrack() => AdvanceToNext(manual: true);
 
         #region 启动与设置应用
 
@@ -151,10 +266,6 @@ namespace musicPlayer
             };
             UpdatePlayModeButton();
 
-            // --- 封面图片 ---
-            string cover = Db.GetSetting("cover_picture_file");
-            if (File.Exists(cover)) LoadAlbumCover(cover);
-
             // --- 全局背景（图片或视频） ---
             string bg = Db.GetSetting("background_file");
             if (File.Exists(bg)) ApplyBackground(bg);
@@ -162,6 +273,10 @@ namespace musicPlayer
             // --- 桌面歌词 ---
             if (Db.GetSettingBool("desktop_lyrics_visible"))
                 ShowDesktopLyricsWindow();
+
+            // --- 侧栏收起状态（启动直接摆好，不带动画） ---
+            sidebarCollapsed = Db.GetSettingBool("sidebar_collapsed");
+            ApplySidebarState(animate: false);
 
             // --- 上次播放歌曲：加载但不自动播放（PRD 5.6） ---
             LoadLastTrack();
@@ -206,7 +321,7 @@ namespace musicPlayer
             }
 
             LoadLyricsForCurrentSong(item.FullPath);
-            txtNowPlaying.Text = item.Title;
+            txtWindowTitle.Text = item.Title;
             Title = $"已就绪: {item.Title} - 音乐播放器";
             isPlaying = false;
             btnPlayPause.Content = "▶️";
@@ -262,17 +377,77 @@ namespace musicPlayer
             }
         }
 
-        /// <summary>新建歌单：弹输入框 → 入库 → 选中。</summary>
+        /// <summary>新建歌单：＋按钮原地变成内联输入框（不再弹独立窗口）。</summary>
         private void btnNewPlaylist_Click(object sender, RoutedEventArgs e)
+            => ShowPlaylistEditor(null);
+
+        /// <summary>内联编辑框当前模式："create" / "rename"，null = 未在编辑。</summary>
+        private string? playlistEditMode;
+        private PlaylistItem? playlistRenameTarget;
+
+        /// <summary>展开歌单名内联编辑框：target=null 为新建，否则重命名 target。</summary>
+        private void ShowPlaylistEditor(PlaylistItem? target)
         {
-            string? name = ShowInputDialog("新建歌单", "");
-            if (string.IsNullOrWhiteSpace(name)) return;
+            playlistRenameTarget = target;
+            playlistEditMode = target == null ? "create" : "rename";
+            txtPlaylistEditor.Text = target?.Name ?? "";
+            btnNewPlaylist.Visibility = Visibility.Collapsed;
+            txtPlaylistEditor.Visibility = Visibility.Visible;
+            txtPlaylistEditor.Focus();
+            txtPlaylistEditor.SelectAll();
+        }
 
-            long newId = Db.CreatePlaylist(name.Trim());
-            LoadPlaylists();
+        private void HidePlaylistEditor()
+        {
+            playlistEditMode = null;
+            playlistRenameTarget = null;
+            txtPlaylistEditor.Visibility = Visibility.Collapsed;
+            btnNewPlaylist.Visibility = Visibility.Visible;
+        }
 
-            var item = Playlists.FirstOrDefault(p => p.Id == newId);
-            if (item != null) PlaylistsList.SelectedItem = item;
+        private void txtPlaylistEditor_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter)
+            {
+                CommitPlaylistEditor();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Escape)
+            {
+                HidePlaylistEditor();
+                e.Handled = true;
+            }
+        }
+
+        /// <summary>编辑框失焦 = 确认（和回车一致；Esc 取消时模式已被清空，不会走到这里）。</summary>
+        private void txtPlaylistEditor_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (playlistEditMode != null) CommitPlaylistEditor();
+        }
+
+        private void CommitPlaylistEditor()
+        {
+            string name = txtPlaylistEditor.Text.Trim();
+            string mode = playlistEditMode ?? "create";
+            var target = playlistRenameTarget;
+            HidePlaylistEditor();
+
+            if (string.IsNullOrEmpty(name)) return;
+
+            if (mode == "create")
+            {
+                long newId = Db.CreatePlaylist(name);
+                LoadPlaylists();
+                var item = Playlists.FirstOrDefault(p => p.Id == newId);
+                if (item != null) PlaylistsList.SelectedItem = item;
+                ShowToast($"已创建歌单「{name}」");
+            }
+            else if (target != null && name != target.Name)
+            {
+                Db.RenamePlaylist(target.Id, name);
+                target.Name = name; // INPC 自动刷新方块文字和 DisplayChar
+                ShowToast($"已重命名为「{name}」");
+            }
         }
 
         /// <summary>右键菜单当前指向的歌单（菜单打开时由 PlaylistMenu_Opening 记录）。</summary>
@@ -284,17 +459,12 @@ namespace musicPlayer
             contextMenuPlaylist = (sender as Border)?.DataContext as PlaylistItem;
         }
 
-        /// <summary>右键重命名歌单。</summary>
+        /// <summary>右键重命名歌单：同样用内联编辑框。</summary>
         private void PlaylistRename_Click(object sender, RoutedEventArgs e)
         {
             var item = contextMenuPlaylist;
             if (item == null) return;
-
-            string? newName = ShowInputDialog("重命名歌单", item.Name);
-            if (string.IsNullOrWhiteSpace(newName) || newName.Trim() == item.Name) return;
-
-            Db.RenamePlaylist(item.Id, newName.Trim());
-            item.Name = newName.Trim(); // INPC 自动刷新方块文字和 DisplayChar
+            ShowPlaylistEditor(item);
         }
 
         /// <summary>右键删除歌单（二次确认，只删歌单和关联，不删歌曲/物理文件）。</summary>
@@ -315,46 +485,6 @@ namespace musicPlayer
             {
                 SelectPlaylist(0); // 当前歌单被删 → 回到全部歌曲
             }
-        }
-
-        /// <summary>简易输入对话框（新建/重命名歌单用）。</summary>
-        private string? ShowInputDialog(string title, string defaultValue)
-        {
-            bool confirmed = false;
-
-            var input = new TextBox { Text = defaultValue, Margin = new Thickness(0, 8, 0, 12) };
-            input.Loaded += (_, _) => { input.SelectAll(); input.Focus(); };
-
-            var ok = new Button { Content = "确定", Width = 72, Margin = new Thickness(0, 0, 8, 0), IsDefault = true };
-            var cancel = new Button { Content = "取消", Width = 72, IsCancel = true };
-            ok.Click += (_, _) => confirmed = true;
-
-            var buttons = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Right
-            };
-            buttons.Children.Add(ok);
-            buttons.Children.Add(cancel);
-
-            var panel = new StackPanel { Margin = new Thickness(14) };
-            panel.Children.Add(new TextBlock { Text = "歌单名称：" });
-            panel.Children.Add(input);
-            panel.Children.Add(buttons);
-
-            var dlg = new Window
-            {
-                Title = title,
-                Owner = this,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                SizeToContent = SizeToContent.WidthAndHeight,
-                ResizeMode = ResizeMode.NoResize,
-                Content = panel
-            };
-            ok.Click += (_, _) => dlg.Close();
-
-            dlg.ShowDialog();
-            return confirmed ? input.Text : null;
         }
 
         #endregion
@@ -518,11 +648,10 @@ namespace musicPlayer
                 items = Db.GetAllTracks();
             }
 
-            // 搜索过滤
+            // 搜索过滤（默认正则模式；Regex.IsMatch 天然支持子串匹配，普通文字直接搜也符合直觉）
             if (activeSearchText != null)
             {
-                bool regexMode = btnRegexToggle.IsChecked == true;
-                items = items.Where(t => MatchesSearch(t.Title, activeSearchText, regexMode));
+                items = items.Where(t => MatchesSearch(t.Title, activeSearchText));
             }
 
             // 排序（只按歌名）
@@ -538,18 +667,38 @@ namespace musicPlayer
 
             UpdatePlayingMarkers();
             RestoreSelection();
+
+            // 搜索后默认选中第一条结果（配合 ↑↓ 微调、回车即播）
+            if (activeSearchText != null && VisibleTracks.Count > 0 && musicfilesListView.SelectedItem == null)
+            {
+                musicfilesListView.SelectedIndex = 0;
+                musicfilesListView.ScrollIntoView(VisibleTracks[0]);
+            }
+
             shuffleBag.Clear(); // 队列变了，随机池作废重来
         }
 
-        /// <summary>判断歌名是否命中搜索（普通包含 / 正则，均不区分大小写）。</summary>
-        private static bool MatchesSearch(string? title, string text, bool regexMode)
+        /// <summary>↑↓ 键在可见列表中移动选中项（不抢焦点，搜索框里可以边输边选）。</summary>
+        private void NavigateSelection(int delta)
+        {
+            if (VisibleTracks.Count == 0 || playlistEditMode != null) return;
+
+            int idx = musicfilesListView.SelectedIndex;
+            int next = idx < 0
+                ? (delta > 0 ? 0 : VisibleTracks.Count - 1) // 未选中时：↓ 到第一条、↑ 到最后一条
+                : Math.Clamp(idx + delta, 0, VisibleTracks.Count - 1);
+
+            musicfilesListView.SelectedIndex = next;
+            musicfilesListView.ScrollIntoView(musicfilesListView.SelectedItem);
+        }
+
+        /// <summary>判断歌名是否命中搜索（默认正则模式，不区分大小写）。</summary>
+        private static bool MatchesSearch(string? title, string text)
         {
             if (string.IsNullOrEmpty(title)) return false;
             try
             {
-                return regexMode
-                    ? Regex.IsMatch(title, text, RegexOptions.IgnoreCase)
-                    : title.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+                return Regex.IsMatch(title, text, RegexOptions.IgnoreCase);
             }
             catch (ArgumentException)
             {
@@ -603,18 +752,15 @@ namespace musicPlayer
                 return;
             }
 
-            // 正则模式先校验，无效直接提示（PRD 5.4）
-            if (btnRegexToggle.IsChecked == true)
+            // 正则校验（默认正则模式，无效直接提示）
+            try
             {
-                try
-                {
-                    _ = new Regex(text);
-                }
-                catch (ArgumentException)
-                {
-                    MessageBox.Show("正则表达式无效。", "搜索", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
+                _ = new Regex(text);
+            }
+            catch (ArgumentException)
+            {
+                ShowToast("正则表达式无效。", warning: true);
+                return;
             }
 
             activeSearchText = text;
@@ -622,7 +768,7 @@ namespace musicPlayer
 
             if (VisibleTracks.Count == 0)
             {
-                MessageBox.Show("未找到匹配歌曲。", "搜索", MessageBoxButton.OK, MessageBoxImage.Information);
+                ShowToast("未找到匹配歌曲。");
             }
         }
 
@@ -705,8 +851,7 @@ namespace musicPlayer
             {
                 Db.AddTrackToPlaylist(playlistId, t.Id); // 重复添加被唯一约束忽略
             }
-            MessageBox.Show($"已把 {tracks.Count} 首歌曲添加到歌单。",
-                "添加到歌单", MessageBoxButton.OK, MessageBoxImage.Information);
+            ShowToast($"已把 {tracks.Count} 首歌曲添加到歌单。");
         }
 
         /// <summary>从当前歌单移除选中歌曲（只解除关联）。</summary>
@@ -730,7 +875,7 @@ namespace musicPlayer
             if (musicfilesListView.SelectedItem is not TrackItem track) return;
             if (!File.Exists(track.FullPath))
             {
-                MessageBox.Show("文件不存在。", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                ShowToast("文件不存在。", warning: true);
                 return;
             }
 
@@ -784,8 +929,7 @@ namespace musicPlayer
                 libraryCache.RemoveAll(t => t.FullPath == track.FullPath);
                 VisibleTracks.Remove(track);
                 shuffleBag.Clear();
-                MessageBox.Show("文件不存在，已从音乐库移除。",
-                    "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                ShowToast("文件不存在，已从音乐库移除。", warning: true);
 
                 if (currentTrack != null && currentTrack.FullPath == track.FullPath)
                 {
@@ -795,18 +939,16 @@ namespace musicPlayer
                 return;
             }
 
-            // Stop() 会触发一次 MediaEnded，先打上标记吞掉它
-            isHandlingAutoPlay = true;
+            // 直接换 Source：MediaElement 会自动关闭旧媒体并打开新的，
+            // 这个过程不会触发 MediaEnded，所以不会误触发"自动切下一首"
             try
             {
-                mediaPlayer.Stop();
                 mediaPlayer.Source = new Uri(track.FullPath);
                 mediaPlayer.Play();
                 ApplyVolume();
             }
             catch (Exception ex)
             {
-                isHandlingAutoPlay = false;
                 Debug.WriteLine($"播放失败 {track.FullPath}: {ex.Message}");
                 HandlePlayFailure();
                 return;
@@ -816,7 +958,7 @@ namespace musicPlayer
             currentTrack = track;
             UpdatePlayingMarkers();
 
-            txtNowPlaying.Text = track.Title;
+            txtWindowTitle.Text = track.Title;
             Title = $"正在播放: {track.Title} - 音乐播放器";
 
             // 记住这次播放（重启后加载但不自动播）
@@ -827,7 +969,6 @@ namespace musicPlayer
             // 播放态 UI
             isPlaying = true;
             btnPlayPause.Content = "⏸️";
-            spinningStoryboard?.Begin(VisualizerGrid, true); // 从头开始转
             timer.Start();
         }
 
@@ -839,8 +980,7 @@ namespace musicPlayer
             if (consecutiveFailures >= 5)
             {
                 StopPlayback();
-                MessageBox.Show("连续 5 首播放失败，已暂停播放。",
-                    "播放错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                ShowToast("连续 5 首播放失败，已暂停播放。", warning: true);
                 return;
             }
 
@@ -943,7 +1083,6 @@ namespace musicPlayer
             if (isPlaying)
             {
                 mediaPlayer.Pause();
-                spinningStoryboard?.Pause(VisualizerGrid);
                 timer.Stop();
                 btnPlayPause.Content = "▶️";
                 isPlaying = false;
@@ -951,7 +1090,6 @@ namespace musicPlayer
             else
             {
                 mediaPlayer.Play();
-                spinningStoryboard?.Resume(VisualizerGrid);
                 timer.Start();
                 btnPlayPause.Content = "⏸️";
                 isPlaying = true;
@@ -961,10 +1099,11 @@ namespace musicPlayer
         /// <summary>停止播放并复位 UI（不切歌）。</summary>
         private void StopPlayback()
         {
+            // 先摘掉源再 Stop：媒体关闭后 Stop 不会引发 MediaEnded，
+            // 避免误触发"播完自动切下一首"
+            mediaPlayer.Source = null;
             mediaPlayer.Stop();
-            mediaPlayer.Source = null; // 防止之后误触发 ended 自动下一首
 
-            spinningStoryboard?.Stop(VisualizerGrid);
             timer.Stop();
             isPlaying = false;
             btnPlayPause.Content = "▶️";
@@ -973,11 +1112,7 @@ namespace musicPlayer
         /// <summary>自然播完 → 单曲循环 / 自动切下一首。</summary>
         private void mediaPlayer_MediaEnded(object sender, RoutedEventArgs e)
         {
-            if (isHandlingAutoPlay)
-            {
-                isHandlingAutoPlay = false;
-                return; // 主动 Stop 引发的事件，忽略
-            }
+            if (mediaPlayer.Source == null) return;
 
             if (playMode == PlayMode.RepeatOne)
             {
@@ -986,7 +1121,6 @@ namespace musicPlayer
                 return;
             }
 
-            isHandlingAutoPlay = true; // AdvanceToNext → PlayTrack 里的 Stop() 会再触发一次
             AdvanceToNext(manual: false);
         }
 
@@ -1062,12 +1196,22 @@ namespace musicPlayer
             }
         }
 
+        /// <summary>
+        /// 鼠标按下进度条即视为"用户正在操作"：冻结定时器回写。
+        /// 否则点击跳转后的新值会在松手前被定时器打回当前播放位置，导致点击跳转失效。
+        /// </summary>
+        private void sliderProgress_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+            => isDraggingProgress = true;
+
         /// <summary>点击进度条任意位置直接跳转。</summary>
         private void sliderProgress_PreviewMouseUp(object sender, MouseButtonEventArgs e)
         {
+            isDraggingProgress = false; // 操作结束，恢复定时器回写
+
             if (!mediaPlayer.NaturalDuration.HasTimeSpan) return;
 
             mediaPlayer.Position = TimeSpan.FromSeconds(sliderProgress.Value);
+            txtCurrentTime.Text = TimeSpan.FromSeconds(sliderProgress.Value).ToString(@"mm\:ss");
 
             if (!isPlaying && mediaPlayer.Source != null)
             {
@@ -1105,7 +1249,7 @@ namespace musicPlayer
             btnMute.Content = isMuted ? "🔇" : "🔊";
         }
 
-        /// <summary>键盘 ↑/↓ 调音量。</summary>
+        /// <summary>键盘 Ctrl+W / Ctrl+S 调音量（步长 5）。</summary>
         private void AdjustVolume(double delta)
         {
             sliderVolume.Value = Math.Clamp(sliderVolume.Value + delta, sliderVolume.Minimum, sliderVolume.Maximum);
@@ -1341,13 +1485,13 @@ namespace musicPlayer
                 }
                 else
                 {
-                    MessageBox.Show("不支持的背景格式。", "背景设置", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    ShowToast("不支持的背景格式。", warning: true);
                 }
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"应用背景失败: {ex.Message}");
-                MessageBox.Show("背景加载失败，已使用默认背景。", "背景设置", MessageBoxButton.OK, MessageBoxImage.Warning);
+                ShowToast("背景加载失败，已使用默认背景。", warning: true);
             }
         }
 
@@ -1359,42 +1503,118 @@ namespace musicPlayer
             this.Background = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x1C));
         }
 
-        /// <summary>加载专辑封面图（旋转圆盘）。</summary>
-        public void LoadAlbumCover(string filePath)
-        {
-            if (string.IsNullOrEmpty(filePath)) return;
-            try
-            {
-                AlbumCoverBrush.ImageSource =
-                    new System.Windows.Media.Imaging.BitmapImage(new Uri(filePath, UriKind.Absolute));
-            }
-            catch (Exception)
-            {
-                AlbumCoverBrush.ImageSource = null;
-            }
-        }
-
-        /// <summary>点击封面圆盘 → 选图。</summary>
-        private void VisualizerGrid_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-        {
-            var dialog = new Microsoft.Win32.OpenFileDialog
-            {
-                Filter = "图片文件|*.jpg;*.jpeg;*.png;*.bmp;*.gif|所有文件|*.*"
-            };
-
-            if (dialog.ShowDialog() == true)
-            {
-                LoadAlbumCover(dialog.FileName);
-                Db.SetSetting("cover_picture_file", dialog.FileName);
-            }
-        }
-
         /// <summary>背景视频循环播放。</summary>
         private void backgroundVideo_MediaEnded(object sender, RoutedEventArgs e)
         {
             backgroundVideo.Position = TimeSpan.Zero;
             backgroundVideo.Play();
         }
+
+        #endregion
+
+        #region 侧栏收起/展开
+
+        /// <summary>侧栏（歌单栏 + 歌曲列表）是否处于收起状态，持久化到 settings。</summary>
+        private bool sidebarCollapsed;
+
+        private void btnCollapseSidebar_Click(object sender, RoutedEventArgs e) => ToggleSidebar();
+
+        private void btnExpandSidebar_Click(object sender, RoutedEventArgs e) => ToggleSidebar();
+
+        private void ToggleSidebar()
+        {
+            sidebarCollapsed = !sidebarCollapsed;
+            Db.SetSettingBool("sidebar_collapsed", sidebarCollapsed);
+            ApplySidebarState(animate: true);
+        }
+
+        /// <summary>应用侧栏状态：收起时歌词铺满整个窗口，展开时恢复原宽度。</summary>
+        private void ApplySidebarState(bool animate)
+        {
+            double playlistWidth = sidebarCollapsed ? 0 : 60;
+            double songsWidth = sidebarCollapsed ? 0 : 340;
+
+            // MinWidth 会顶住 0 宽度，收起时先放开，展开时再恢复
+            ColSongs.MinWidth = sidebarCollapsed ? 0 : 280;
+
+            SidebarSplitter.Visibility = sidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            btnExpandSidebar.Visibility = sidebarCollapsed ? Visibility.Visible : Visibility.Collapsed;
+            btnCollapseSidebar.Visibility = sidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+
+            if (animate)
+            {
+                var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
+                AnimateColumnWidth(ColPlaylists, playlistWidth, ease);
+                AnimateColumnWidth(ColSongs, songsWidth, ease);
+            }
+            else
+            {
+                ColPlaylists.Width = new GridLength(playlistWidth, GridUnitType.Pixel);
+                ColSongs.Width = new GridLength(songsWidth, GridUnitType.Pixel);
+            }
+        }
+
+        /// <summary>用 GridLengthAnimation 做列宽过渡（WPF 原生不支持 GridLength 动画）。</summary>
+        private static void AnimateColumnWidth(ColumnDefinition column, double to, IEasingFunction ease)
+        {
+            var anim = new GridLengthAnimation
+            {
+                From = column.Width.Value,
+                To = to,
+                Duration = new Duration(TimeSpan.FromMilliseconds(280)),
+                EasingFunction = ease
+            };
+            column.BeginAnimation(ColumnDefinition.WidthProperty, anim);
+        }
+
+        #endregion
+
+        #region 应用内轻提示（Toast）
+
+        private System.Windows.Threading.DispatcherTimer? toastTimer;
+
+        /// <summary>
+        /// 应用内轻提示：主区顶部居中淡入，停留约 2.4 秒后淡出。
+        /// 替代系统 MessageBox 弹窗（信息/警告类）；需要用户做选择的确认框仍用弹窗。
+        /// </summary>
+        public void ShowToast(string message, bool warning = false)
+        {
+            txtToast.Text = message;
+            toastBorder.Background = new SolidColorBrush(warning
+                ? Color.FromArgb(0xF0, 0x4A, 0x1E, 0x24)  // 警告：暗红底
+                : Color.FromArgb(0xF0, 0x1E, 0x1E, 0x28)); // 信息：深灰底
+            toastBorder.Visibility = Visibility.Visible;
+            toastBorder.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)));
+
+            if (toastTimer == null)
+            {
+                toastTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2400) };
+                toastTimer.Tick += (_, _) =>
+                {
+                    toastTimer.Stop();
+                    var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(300));
+                    fadeOut.Completed += (_, _) => toastBorder.Visibility = Visibility.Collapsed;
+                    toastBorder.BeginAnimation(OpacityProperty, fadeOut);
+                };
+            }
+            toastTimer.Stop();
+            toastTimer.Start();
+        }
+
+        #endregion
+
+        #region 自绘标题栏按钮
+
+        private void btnTitleMinimize_Click(object sender, RoutedEventArgs e)
+            => WindowState = WindowState.Minimized;
+
+        /// <summary>最大化 / 还原切换（无边框窗口由 WindowChrome 负责最大化时避开任务栏）。</summary>
+        private void btnTitleMaximize_Click(object sender, RoutedEventArgs e)
+            => WindowState = WindowState == WindowState.Maximized
+                ? WindowState.Normal : WindowState.Maximized;
+
+        private void btnTitleClose_Click(object sender, RoutedEventArgs e) => Close();
 
         #endregion
 
@@ -1450,15 +1670,38 @@ namespace musicPlayer
         {
             bool isCtrlDown = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
 
-            // 输入框聚焦时：只响应 Esc（清除搜索），其余按键交给输入框
-            if (Keyboard.FocusedElement is TextBox)
+            // 歌单名内联编辑框聚焦：所有按键交给编辑框自己（回车/Esc 由其 KeyDown 处理）
+            if (Keyboard.FocusedElement == txtPlaylistEditor) return;
+
+            // 搜索框聚焦时：Esc 清除搜索、↑↓ 移动选中项、回车执行搜索（搜完焦点移到歌曲列表）
+            if (Keyboard.FocusedElement == txtSearch)
             {
-                if (e.Key == Key.Escape)
+                switch (e.Key)
                 {
-                    ClearSearch();
-                    e.Handled = true;
+                    case Key.Escape:
+                        ClearSearch();
+                        e.Handled = true;
+                        break;
+
+                    case Key.Up:
+                        NavigateSelection(-1);
+                        e.Handled = true;
+                        break;
+
+                    case Key.Down:
+                        NavigateSelection(1);
+                        e.Handled = true;
+                        break;
+
+                    case Key.Enter:
+                        // 搜索栏里回车 = 执行搜索（第一条结果自动选中），
+                        // 焦点随之移到歌曲列表，之后回车才是"播放选中歌曲"
+                        RunSearch();
+                        musicfilesListView.Focus();
+                        e.Handled = true;
+                        break;
                 }
-                return;
+                return; // 其余按键交给搜索框自己处理（输入文字等）
             }
 
             switch (e.Key)
@@ -1468,24 +1711,42 @@ namespace musicPlayer
                     e.Handled = true;
                     break;
 
-                case Key.Left when isCtrlDown: // 上一首
+                case Key.A when isCtrlDown: // 上一首
                     btnPrevious_Click(null, new RoutedEventArgs());
                     e.Handled = true;
                     break;
 
-                case Key.Right when isCtrlDown: // 下一首
+                case Key.D when isCtrlDown: // 下一首
                     btnNext_Click(null, new RoutedEventArgs());
                     e.Handled = true;
                     break;
 
-                case Key.Up: // 音量 +
+                case Key.W when isCtrlDown: // 音量 +
                     AdjustVolume(5);
                     e.Handled = true;
                     break;
 
-                case Key.Down: // 音量 -
+                case Key.S when isCtrlDown: // 音量 -
                     AdjustVolume(-5);
                     e.Handled = true;
+                    break;
+
+                case Key.Up: // 选中上一首
+                    NavigateSelection(-1);
+                    e.Handled = true;
+                    break;
+
+                case Key.Down: // 选中下一首
+                    NavigateSelection(1);
+                    e.Handled = true;
+                    break;
+
+                case Key.Enter: // 直接播放当前选中的歌曲
+                    if (musicfilesListView.SelectedItem is TrackItem selectedTrack)
+                    {
+                        PlayTrack(selectedTrack);
+                        e.Handled = true;
+                    }
                     break;
 
                 case Key.M: // 静音切换
@@ -1515,6 +1776,11 @@ namespace musicPlayer
                         menuRemoveFromPlaylist_Click(null, new RoutedEventArgs());
                         e.Handled = true;
                     }
+                    break;
+
+                case Key.S: // 收起/展开侧栏（歌词铺满）
+                    ToggleSidebar();
+                    e.Handled = true;
                     break;
             }
         }

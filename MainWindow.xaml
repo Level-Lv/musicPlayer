@@ -7,25 +7,37 @@
         mc:Ignorable="d"
         Title="音乐播放器" Height="640" Width="1080"
         MinHeight="480" MinWidth="860"
-        Background="#FF14141C"
+        Background="#FF0E0E15"
+        WindowStyle="None"
+        FontFamily="Segoe UI, Microsoft YaHei UI"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
         PreviewKeyDown="Window_PreviewKeyDown">
 
-    <Window.Resources>
-        <!-- 封面圆盘旋转动画（底部播放条） -->
-        <Storyboard x:Key="SpinningAnimation" x:Name="SpinningStoryboard">
-            <DoubleAnimation
-                Storyboard.TargetName="RotationTransform"
-                Storyboard.TargetProperty="Angle"
-                From="0" To="360"
-                Duration="0:0:5"
-                RepeatBehavior="Forever" />
-        </Storyboard>
+    <!-- 无边框但保留原生缩放/Aero Snap：拖拽由顶栏 40px 的 CaptionHeight 接管 -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome GlassFrameThickness="0" CaptionHeight="40"
+                      CornerRadius="0" ResizeBorderThickness="8"
+                      UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
 
-        <!-- 歌词普通行样式 -->
+    <Window.Resources>
+
+        <!-- ============================================================
+             基础资源
+             ============================================================ -->
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <SolidColorBrush x:Key="AccentBrush" Color="#FFD700"/>
+        <LinearGradientBrush x:Key="AccentGradient" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#FFE8B93A" Offset="0"/>
+            <GradientStop Color="#FFD9A521" Offset="1"/>
+        </LinearGradientBrush>
+        <CornerRadius x:Key="CardRadius">10</CornerRadius>
+
+        <!-- 歌词普通行样式（code-behind 按此 Key 取样式） -->
         <Style x:Key="NormalLyricTextBlockStyle" TargetType="TextBlock">
             <Setter Property="FontSize" Value="24"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#CCCCCC"/>
+            <Setter Property="Foreground" Value="#B3FFFFFF"/>
             <Setter Property="Margin" Value="0, 5, 0, 5"/>
             <Setter Property="TextAlignment" Value="Center"/>
             <Setter Property="Effect">
@@ -35,7 +47,7 @@
             </Setter>
         </Style>
 
-        <!-- 歌词当前行高亮样式 -->
+        <!-- 歌词当前行高亮样式（code-behind 按此 Key 取样式） -->
         <Style x:Key="HighlightLyricTextBlockStyle" TargetType="TextBlock" BasedOn="{StaticResource NormalLyricTextBlockStyle}">
             <Setter Property="FontSize" Value="32"/>
             <Setter Property="FontWeight" Value="Bold"/>
@@ -46,17 +58,499 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- ============================================================
+             幽灵按钮：透明底 + 悬停浮现柔光（150ms 平滑过渡）
+             ============================================================ -->
+        <Style x:Key="GhostButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#CCFFFFFF"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="Background">
+                <Setter.Value>
+                    <SolidColorBrush Color="#14FFFFFF"/>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="9"
+                                Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <ColorAnimation Storyboard.TargetName="bd"
+                                                Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                To="#30FFFFFF" Duration="0:0:0.15"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <ColorAnimation Storyboard.TargetName="bd"
+                                                Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                To="#14FFFFFF" Duration="0:0:0.25"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Opacity" Value="0.7"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 主操作圆钮：金色渐变 + 光晕，悬停轻微放大 -->
+        <Style x:Key="AccentCircleButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#FF201800"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Border x:Name="glow" CornerRadius="22" Background="Transparent"/>
+                            <Border x:Name="bd" Width="46" Height="46" CornerRadius="23"
+                                    Background="{StaticResource AccentGradient}"
+                                    RenderTransformOrigin="0.5,0.5">
+                                <Border.RenderTransform>
+                                    <ScaleTransform x:Name="bdScale" ScaleX="1" ScaleY="1"/>
+                                </Border.RenderTransform>
+                                <Border.Effect>
+                                    <DropShadowEffect Color="#FFD700" BlurRadius="14" ShadowDepth="0" Opacity="0.35"/>
+                                </Border.Effect>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="bdScale"
+                                                Storyboard.TargetProperty="ScaleX" To="1.08" Duration="0:0:0.12"/>
+                                            <DoubleAnimation Storyboard.TargetName="bdScale"
+                                                Storyboard.TargetProperty="ScaleY" To="1.08" Duration="0:0:0.12"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="bdScale"
+                                                Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.2"/>
+                                            <DoubleAnimation Storyboard.TargetName="bdScale"
+                                                Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Opacity" Value="0.85"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ============================================================
+             现代滑块：细轨道 + 已播放金色填充 + 圆点滑块
+             （DecreaseRepeatButton 当填充条用，无需代码配合）
+             ============================================================ -->
+        <Style x:Key="ModernSliderThumb" TargetType="Thumb">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Grid Background="Transparent" Width="16" Height="16">
+                            <Ellipse x:Name="dot" Width="11" Height="11" Fill="White"
+                                     RenderTransformOrigin="0.5,0.5">
+                                <Ellipse.RenderTransform>
+                                    <ScaleTransform x:Name="dotScale" ScaleX="1" ScaleY="1"/>
+                                </Ellipse.RenderTransform>
+                                <Ellipse.Effect>
+                                    <DropShadowEffect Color="#FFD700" BlurRadius="8" ShadowDepth="0" Opacity="0.6"/>
+                                </Ellipse.Effect>
+                            </Ellipse>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="dotScale"
+                                                Storyboard.TargetProperty="ScaleX" To="1.25" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="dotScale"
+                                                Storyboard.TargetProperty="ScaleY" To="1.25" Duration="0:0:0.1"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="dotScale"
+                                                Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.15"/>
+                                            <DoubleAnimation Storyboard.TargetName="dotScale"
+                                                Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.15"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ModernSlider" TargetType="Slider">
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid VerticalAlignment="Center">
+                            <Track x:Name="PART_Track">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Grid Height="18" Background="Transparent">
+                                                    <Border Height="4" CornerRadius="2"
+                                                            Background="{StaticResource AccentGradient}"
+                                                            VerticalAlignment="Center"/>
+                                                </Grid>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Grid Height="18" Background="Transparent">
+                                                    <Border Height="4" CornerRadius="2" Background="#26FFFFFF"
+                                                            VerticalAlignment="Center"/>
+                                                </Grid>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource ModernSliderThumb}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ============================================================
+             搜索框：圆角 + 内嵌放大镜 + 聚焦金色描边
+             ============================================================ -->
+        <Style x:Key="SearchBox" TargetType="TextBox">
+            <Setter Property="Foreground" Value="#EEFFFFFF"/>
+            <Setter Property="CaretBrush" Value="#FFD700"/>
+            <Setter Property="Padding" Value="4,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="bd" CornerRadius="9"
+                                Background="#1AFFFFFF" BorderBrush="#22FFFFFF" BorderThickness="1">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="🔍" FontSize="12" Margin="11,0,0,0"
+                                           VerticalAlignment="Center" Opacity="0.55"/>
+                                <ScrollViewer Grid.Column="1" x:Name="PART_ContentHost"
+                                              Margin="6,0,8,0" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <ColorAnimation Storyboard.TargetName="bd"
+                                                Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)"
+                                                To="#77FFD700" Duration="0:0:0.18"/>
+                                            <ColorAnimation Storyboard.TargetName="bd"
+                                                Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                To="#24FFFFFF" Duration="0:0:0.18"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <ColorAnimation Storyboard.TargetName="bd"
+                                                Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)"
+                                                To="#22FFFFFF" Duration="0:0:0.3"/>
+                                            <ColorAnimation Storyboard.TargetName="bd"
+                                                Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                To="#1AFFFFFF" Duration="0:0:0.3"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 下拉框：圆角深色 + 滑出动画 -->
+        <Style x:Key="ModernCombo" TargetType="ComboBox">
+            <Setter Property="Foreground" Value="#DDFFFFFF"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <Border x:Name="bd" CornerRadius="9"
+                                    Background="#1AFFFFFF" BorderBrush="#22FFFFFF" BorderThickness="1"/>
+                            <!-- 悬停高亮层：独立一层做淡入淡出，与歌曲列表 item 的微高亮同一手法；
+                                 必须给 ToggleButton 一个透明模板，否则默认按钮 chrome 悬停时会把整块泛亮 -->
+                            <Border x:Name="hoverBd" CornerRadius="9" IsHitTestVisible="False">
+                                <Border.Background>
+                                    <SolidColorBrush Color="#00FFFFFF"/>
+                                </Border.Background>
+                            </Border>
+                            <ToggleButton Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="Transparent"/>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter Margin="10,0,26,0" VerticalAlignment="Center"
+                                              IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              TextElement.Foreground="#DDFFFFFF"
+                                              TextElement.FontSize="12"/>
+                            <Path Data="M0,0 L4,4 8,0" Stroke="#99AAAAAA" StrokeThickness="1.5"
+                                  HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,2,10,0"
+                                  IsHitTestVisible="False"/>
+                            <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True" Placement="Bottom" PopupAnimation="Slide" Focusable="False">
+                                <Border Background="#F21B1B26" BorderBrush="#33FFFFFF" BorderThickness="1"
+                                        CornerRadius="9" Margin="0,4,0,0" Padding="4"
+                                        MinWidth="{TemplateBinding ActualWidth}">
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="Black" BlurRadius="14" ShadowDepth="2" Opacity="0.5"/>
+                                    </Border.Effect>
+                                    <ScrollViewer MaxHeight="170" VerticalScrollBarVisibility="Auto">
+                                        <StackPanel IsItemsHost="True"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <ColorAnimation Storyboard.TargetName="hoverBd"
+                                                Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                To="#1FFFFFFF" Duration="0:0:0.12"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <ColorAnimation Storyboard.TargetName="hoverBd"
+                                                Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                To="#00FFFFFF" Duration="0:0:0.25"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="ItemContainerStyle">
+                <Setter.Value>
+                    <!-- 下拉项：整块可点击；悬停亮起/退去用 120/200ms 平滑过渡，不再是突然变色 -->
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="Foreground" Value="#DDDDDD"/>
+                        <Setter Property="Padding" Value="8,5"/>
+                        <!-- 选中态底色：默认全透明，选中时由 Style.Triggers 静态切到淡金 -->
+                        <Setter Property="Background" Value="#00FFFFFF"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ComboBoxItem">
+                                    <Grid>
+                                        <!-- 选中底色层（也是整块的点击热区） -->
+                                        <Border CornerRadius="6" Background="{TemplateBinding Background}"/>
+                                        <!-- 悬停高亮层（独立一层，动画只作用于它，不和选中态互相覆盖） -->
+                                        <Border x:Name="hoverBd" CornerRadius="6" IsHitTestVisible="False">
+                                            <Border.Background>
+                                                <SolidColorBrush Color="#00FFFFFF"/>
+                                            </Border.Background>
+                                        </Border>
+                                        <ContentPresenter Margin="{TemplateBinding Padding}" IsHitTestVisible="False"/>
+                                    </Grid>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsHighlighted" Value="True">
+                                            <Trigger.EnterActions>
+                                                <BeginStoryboard>
+                                                    <Storyboard>
+                                                        <ColorAnimation Storyboard.TargetName="hoverBd"
+                                                            Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                            To="#2EFFD700" Duration="0:0:0.12"/>
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </Trigger.EnterActions>
+                                            <Trigger.ExitActions>
+                                                <BeginStoryboard>
+                                                    <Storyboard>
+                                                        <ColorAnimation Storyboard.TargetName="hoverBd"
+                                                            Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                            To="#00FFFFFF" Duration="0:0:0.2"/>
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </Trigger.ExitActions>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                        <Style.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#26FFD700"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ============================================================
+             深色右键菜单 + 菜单项 + 分隔线
+             ============================================================ -->
+        <Style TargetType="ContextMenu">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ContextMenu">
+                        <Border Background="#F61C1C26" BorderBrush="#33FFFFFF" BorderThickness="1"
+                                CornerRadius="10" Padding="5">
+                            <Border.Effect>
+                                <DropShadowEffect Color="Black" BlurRadius="16" ShadowDepth="3" Opacity="0.55"/>
+                            </Border.Effect>
+                            <StackPanel IsItemsHost="True"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="MenuItem">
+            <Setter Property="Foreground" Value="#DDDDDD"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Grid>
+                            <Border x:Name="bd" CornerRadius="7" Padding="12,7" Background="Transparent">
+                                <ContentPresenter ContentSource="Header" RecognizesAccessKey="True"/>
+                            </Border>
+                            <Popup x:Name="PART_Popup" Placement="Right" Focusable="False"
+                                   PopupAnimation="Fade"
+                                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                   AllowsTransparency="True">
+                                <Border Background="#F61C1C26" BorderBrush="#33FFFFFF" BorderThickness="1"
+                                        CornerRadius="10" Padding="5" Margin="6,0,0,0">
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="Black" BlurRadius="16" ShadowDepth="3" Opacity="0.55"/>
+                                    </Border.Effect>
+                                    <StackPanel IsItemsHost="True"/>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#30FFD700"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#55666666"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="Separator">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Separator">
+                        <Border Height="1" Background="#22FFFFFF" Margin="8,4"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ============================================================
+             细滚动条（全局生效）
+             ============================================================ -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid Background="Transparent">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border Background="#2EFFFFFF" CornerRadius="4" Margin="2,0"/>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#40FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
     </Window.Resources>
 
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="*"/>   <!-- 主区：歌单栏 | 歌曲列表 | 歌词 -->
+            <RowDefinition Height="40"/>   <!-- 自绘标题栏 -->
+            <RowDefinition Height="*"/>    <!-- 主区：歌单栏 | 歌曲列表 | 歌词 -->
             <RowDefinition Height="Auto"/> <!-- 底部播放条 -->
         </Grid.RowDefinitions>
 
         <!-- 全局背景视频：铺满整个窗口，压在最底层 -->
         <MediaElement x:Name="backgroundVideo"
-            Grid.Row="0" Grid.RowSpan="2"
+            Grid.Row="0" Grid.RowSpan="3"
             LoadedBehavior="Manual"
             UnloadedBehavior="Manual"
             Stretch="UniformToFill"
@@ -65,32 +559,111 @@
             Panel.ZIndex="-1"
             MediaEnded="backgroundVideo_MediaEnded" />
 
-        <Grid Grid.Row="0">
+        <!-- ============ 自绘标题栏：拖拽区 + 应用名 + 最小化/最大化/关闭 ============ -->
+        <Border Grid.Row="0" Background="#B80E0E15">
+            <Grid>
+                <StackPanel Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="♪" Foreground="#FFD700" FontSize="13"
+                        FontWeight="Bold" VerticalAlignment="Center"/>
+                    <!-- 应用名；播放时由 code-behind 换成歌曲名 -->
+                    <TextBlock x:Name="txtWindowTitle" Text="音乐播放器" Foreground="#99FFFFFF" FontSize="12"
+                        Margin="9,1,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- 窗口按钮必须在 IsHitTestVisibleInChrome=True，否则会被 Caption 拖拽区吃掉点击 -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                    VerticalAlignment="Stretch"
+                    WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button x:Name="btnTitleMinimize" Content="─" Click="btnTitleMinimize_Click"
+                        Width="44" Height="40" FontSize="10" Padding="0"
+                        ToolTip="最小化" Cursor="Hand">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="bd" Background="Transparent">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        TextBlock.Foreground="#AAFFFFFF"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="bd" Property="Background" Value="#22FFFFFF"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                    <Button x:Name="btnTitleMaximize" Content="□" Click="btnTitleMaximize_Click"
+                        Width="44" Height="40" FontSize="10" Padding="0"
+                        ToolTip="最大化 / 还原" Cursor="Hand">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="bd" Background="Transparent">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        TextBlock.Foreground="#AAFFFFFF"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="bd" Property="Background" Value="#22FFFFFF"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                    <Button x:Name="btnTitleClose" Content="✕" Click="btnTitleClose_Click"
+                        Width="44" Height="40" FontSize="10" Padding="0"
+                        ToolTip="关闭" Cursor="Hand">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="bd" Background="Transparent">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        TextBlock.Foreground="#AAFFFFFF"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="bd" Property="Background" Value="#E81123"/>
+                                        <Setter Property="TextBlock.Foreground" Value="White"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="80"/>                                <!-- 歌单方块栏 -->
-                <ColumnDefinition Width="340" MinWidth="280" MaxWidth="480"/> <!-- 歌曲列表 -->
-                <ColumnDefinition Width="Auto"/>                              <!-- 分隔拖拽条 -->
-                <ColumnDefinition Width="*"/>                                 <!-- 歌词主区域 -->
+                <ColumnDefinition x:Name="ColPlaylists" Width="60"/>          <!-- 歌单方块栏 -->
+                <ColumnDefinition x:Name="ColSongs" Width="340" MinWidth="280" MaxWidth="480"/> <!-- 歌曲列表 -->
+                <ColumnDefinition x:Name="ColSplitter" Width="Auto"/>         <!-- 分隔拖拽条 -->
+                <ColumnDefinition x:Name="ColLyrics" Width="*"/>              <!-- 歌词主区域 -->
             </Grid.ColumnDefinitions>
 
             <!-- ================= 歌单方块栏 ================= -->
-            <Border Grid.Column="0" Background="#88111118">
-                <DockPanel LastChildFill="True">
+            <Border Grid.Column="0" Background="#B8121219">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>  <!-- 全部歌曲 -->
+                        <RowDefinition Height="*"/>     <!-- 用户歌单 -->
+                        <RowDefinition Height="Auto"/>  <!-- 新建（紧跟最后一个歌单） -->
+                        <RowDefinition Height="Auto"/>  <!-- 设置（吸底） -->
+                    </Grid.RowDefinitions>
 
                     <!-- 固定"全部歌曲"方块（顶部，不可删除） -->
-                    <Border DockPanel.Dock="Top"
+                    <Border Grid.Row="0"
                         x:Name="AllTracksBox"
-                        Width="56" Height="56" CornerRadius="10"
-                        Background="#33FFFFFF" BorderBrush="#88FFFFFF" BorderThickness="1"
-                        Margin="0,10,0,4" Cursor="Hand"
+                        Width="44" Height="44" CornerRadius="12"
+                        Background="#1FFFFFFF" BorderBrush="#33FFFFFF" BorderThickness="1"
+                        Margin="0,12,0,2" Cursor="Hand"
                         ToolTip="全部歌曲"
                         MouseLeftButtonDown="AllTracksBox_Click">
-                        <TextBlock Text="全" FontSize="22" FontWeight="Bold" Foreground="White"
-                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Grid>
+                            <TextBlock Text="♪" FontSize="19" FontWeight="Bold" Foreground="#FFD700"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Grid>
                     </Border>
 
                     <!-- 用户歌单方块列表（支持拖拽重排） -->
-                    <ListBox x:Name="PlaylistsList" DockPanel.Dock="Top"
+                    <ListBox x:Name="PlaylistsList" Grid.Row="1"
                         Background="Transparent" BorderThickness="0"
                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                         ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -101,7 +674,6 @@
                         Drop="PlaylistsList_Drop">
 
                         <ListBox.ItemContainerStyle>
-                            <!-- 用 ContentPresenter 模板替换默认样式，去掉自带的选中蓝底 -->
                             <Style TargetType="ListBoxItem">
                                 <Setter Property="Template">
                                     <Setter.Value>
@@ -115,110 +687,142 @@
 
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Width="56" Height="56" CornerRadius="10" Margin="0,4"
-                                    Background="#33FFFFFF" BorderBrush="#55FFFFFF" BorderThickness="1"
+                                <Border x:Name="card" Width="44" Height="44" CornerRadius="12" Margin="0,4"
+                                    Background="#1FFFFFFF" BorderBrush="#2EFFFFFF" BorderThickness="1"
                                     ToolTip="{Binding Name}" Cursor="Hand"
-                                    ContextMenuOpening="PlaylistMenu_Opening">
+                                    ContextMenuOpening="PlaylistMenu_Opening"
+                                    RenderTransformOrigin="0.5,0.5">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform x:Name="cardScale" ScaleX="1" ScaleY="1"/>
+                                    </Border.RenderTransform>
                                     <Border.ContextMenu>
                                         <ContextMenu>
                                             <MenuItem Header="重命名" Click="PlaylistRename_Click"/>
                                             <MenuItem Header="删除歌单" Click="PlaylistDelete_Click"/>
                                         </ContextMenu>
                                     </Border.ContextMenu>
-                                    <Border.Style>
-                                        <Style TargetType="Border">
-                                            <Style.Triggers>
-                                                <!-- 鼠标悬停微亮 -->
-                                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                    <Setter Property="Background" Value="#44FFFFFF"/>
-                                                </DataTrigger>
-                                                <!-- 选中高亮 -->
-                                                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                    <Setter Property="BorderBrush" Value="#FFD700"/>
-                                                    <Setter Property="Background" Value="#44FFD700"/>
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Border.Style>
-                                    <TextBlock Text="{Binding DisplayChar}" FontSize="22" FontWeight="Bold"
-                                        Foreground="White"
+                                    <TextBlock Text="{Binding DisplayChar}" FontSize="18" FontWeight="Bold"
+                                        Foreground="#F2FFFFFF"
                                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Border>
+                                <DataTemplate.Triggers>
+                                    <!-- 悬停：微放大 + 提亮（丝滑过渡） -->
+                                    <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                        <Setter TargetName="card" Property="Background" Value="#30FFFFFF"/>
+                                        <DataTrigger.EnterActions>
+                                            <BeginStoryboard>
+                                                <Storyboard>
+                                                    <DoubleAnimation Storyboard.TargetName="cardScale"
+                                                        Storyboard.TargetProperty="ScaleX" To="1.06" Duration="0:0:0.12"/>
+                                                    <DoubleAnimation Storyboard.TargetName="cardScale"
+                                                        Storyboard.TargetProperty="ScaleY" To="1.06" Duration="0:0:0.12"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </DataTrigger.EnterActions>
+                                        <DataTrigger.ExitActions>
+                                            <BeginStoryboard>
+                                                <Storyboard>
+                                                    <DoubleAnimation Storyboard.TargetName="cardScale"
+                                                        Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.2"/>
+                                                    <DoubleAnimation Storyboard.TargetName="cardScale"
+                                                        Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.2"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </DataTrigger.ExitActions>
+                                    </DataTrigger>
+                                    <!-- 选中：金色描边 + 柔光 -->
+                                    <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                        <Setter TargetName="card" Property="BorderBrush" Value="#CCFFD700"/>
+                                        <Setter TargetName="card" Property="Background" Value="#33FFD700"/>
+                                        <Setter TargetName="card" Property="Effect">
+                                            <Setter.Value>
+                                                <DropShadowEffect Color="#FFD700" BlurRadius="12" ShadowDepth="0" Opacity="0.45"/>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
 
-                    <!-- 底部：新建歌单 / 设置（DockPanel Bottom 顺序自下而上） -->
-                    <Button DockPanel.Dock="Bottom"
+                    <!-- ＋ 新建：紧跟最后一个歌单下面；点击后原地变成输入框（回车确认 / Esc 取消） -->
+                    <Grid Grid.Row="2">
+                        <Button x:Name="btnNewPlaylist" Content="＋"
+                            Style="{StaticResource GhostButton}"
+                            FontSize="15" Padding="0" Width="44" Height="34"
+                            ToolTip="新建歌单" Cursor="Hand" Margin="0,4,0,0"
+                            Click="btnNewPlaylist_Click"/>
+                        <TextBox x:Name="txtPlaylistEditor"
+                            Height="34" Width="52" Margin="0,4,0,0"
+                            FontSize="13" TextAlignment="Center"
+                            VerticalContentAlignment="Center"
+                            Background="#26FFFFFF" Foreground="#F2FFFFFF"
+                            BorderBrush="#88FFD700" BorderThickness="1" CaretBrush="#FFD700"
+                            Visibility="Collapsed"
+                            ToolTip="输入歌单名：回车确认，Esc 取消"
+                            KeyDown="txtPlaylistEditor_KeyDown"
+                            LostFocus="txtPlaylistEditor_LostFocus"/>
+                    </Grid>
+
+                    <!-- 设置：吸底 -->
+                    <Button Grid.Row="3"
                         x:Name="btnSettings" Content="⚙"
-                        FontSize="18" Padding="0" Width="56" Height="40"
-                        Background="Transparent" Foreground="LightGray" BorderThickness="0"
+                        Style="{StaticResource GhostButton}"
+                        FontSize="16" Padding="0" Width="44" Height="34"
                         ToolTip="设置" Cursor="Hand" Margin="0,4,0,10"
                         Click="btnSettings_Click"/>
-                    <Button DockPanel.Dock="Bottom"
-                        x:Name="btnNewPlaylist" Content="＋"
-                        FontSize="18" Padding="0" Width="56" Height="40"
-                        Background="Transparent" Foreground="LightGray" BorderThickness="0"
-                        ToolTip="新建歌单" Cursor="Hand" Margin="0,4,0,0"
-                        Click="btnNewPlaylist_Click"/>
-                </DockPanel>
+                </Grid>
             </Border>
 
             <!-- ================= 歌曲列表面板 ================= -->
-            <Border Grid.Column="1" Background="#99111118">
-                <Grid Margin="6">
+            <Border Grid.Column="1" Background="#C414141D">
+                <Grid Margin="10,10,10,6">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/> <!-- 搜索工具行 -->
                         <RowDefinition Height="*"/>    <!-- 歌曲列表 -->
                     </Grid.RowDefinitions>
 
-                    <!-- 搜索 / 范围 / 正则 / 排序 -->
-                    <Grid Grid.Row="0" Margin="2,4,2,6">
+                    <!-- 搜索 / 范围 / 排序（收起侧栏把手已移到歌曲栏右缘垂直居中） -->
+                    <Grid Grid.Row="0" Margin="2,0,2,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
                         <TextBox x:Name="txtSearch"
                             Grid.Column="0"
-                            Height="28" Padding="6,2"
-                            VerticalContentAlignment="Center"
-                            Background="#33FFFFFF" Foreground="White"
-                            BorderBrush="#55FFFFFF" BorderThickness="1"
-                            ToolTip="输入歌名后按回车搜索（Esc 清除）"
+                            Height="32" Padding="4,2"
+                            Style="{StaticResource SearchBox}"
+                            ToolTip="输入正则表达式搜索（回车执行，Esc 清除）"
                             KeyDown="txtSearch_KeyDown"/>
 
                         <ComboBox x:Name="cmbSearchScope"
-                            Grid.Column="1" Width="80" Height="28" Margin="4,0,0,0"
+                            Grid.Column="1" Width="86" Height="32" Margin="6,0,0,0"
                             SelectedIndex="0"
+                            Style="{StaticResource ModernCombo}"
                             ToolTip="搜索范围"
                             SelectionChanged="cmbSearchScope_SelectionChanged">
                             <ComboBoxItem Content="当前歌单"/>
                             <ComboBoxItem Content="全部歌曲"/>
                         </ComboBox>
 
-                        <ToggleButton x:Name="btnRegexToggle"
-                            Grid.Column="2" Width="34" Height="28" Margin="4,0,0,0"
-                            Content=".*" FontSize="12"
-                            Background="Transparent" Foreground="LightGray"
-                            ToolTip="正则模式开关（不区分大小写）"/>
-
                         <Button x:Name="btnSort"
-                            Grid.Column="3" Width="34" Height="28" Margin="4,0,0,0"
-                            Content="⇅" FontSize="14"
-                            Background="Transparent" Foreground="LightGray" BorderThickness="0"
+                            Grid.Column="2" Width="36" Height="32" Margin="6,0,0,0"
+                            Content="⇅" FontSize="13" Padding="0"
+                            Style="{StaticResource GhostButton}"
                             ToolTip="按歌名升序/降序" Cursor="Hand"
                             Click="btnSort_Click"/>
                     </Grid>
 
-                    <!-- 歌曲列表：歌名 / 时长；多选；右键菜单 -->
+                    <!-- 歌曲列表：卡片式条目；多选；右键菜单 -->
                     <ListView x:Name="musicfilesListView"
                         Grid.Row="1"
                         Background="Transparent"
                         BorderThickness="0"
+                        Padding="0"
                         SelectionMode="Extended"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                         MouseDoubleClick="musicfilesListView_MouseDoubleClick"
                         ContextMenuOpening="SongListContextMenu_Opening">
 
@@ -234,32 +838,146 @@
                             </ContextMenu>
                         </ListView.ContextMenu>
 
-                        <ListView.Resources>
-                            <Style TargetType="{x:Type ListViewItem}">
-                                <Setter Property="Foreground" Value="LightGray"/>
-                                <Setter Property="Background" Value="Transparent"/>
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="2,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/> <!-- 图标 / 均衡器 -->
+                                        <ColumnDefinition Width="*"/>    <!-- 歌名 -->
+                                        <ColumnDefinition Width="Auto"/> <!-- 时长 -->
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- 歌曲图标；正在播放时变成跳动的均衡器 -->
+                                    <Grid Grid.Column="0" Width="34" Height="34" VerticalAlignment="Center">
+                                        <Border x:Name="iconBg" CornerRadius="9" Background="#1FFFFFFF">
+                                            <TextBlock x:Name="noteIcon" Text="♪" FontSize="16"
+                                                       Foreground="#99FFFFFF"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <StackPanel x:Name="equalizer" Orientation="Horizontal"
+                                                    Height="16" VerticalAlignment="Bottom"
+                                                    HorizontalAlignment="Center" Visibility="Collapsed">
+                                            <Rectangle x:Name="eqBar1" Width="3" Height="4" Fill="#FFD700"
+                                                       Margin="1.5,0" RadiusX="1.5" RadiusY="1.5"/>
+                                            <Rectangle x:Name="eqBar2" Width="3" Height="4" Fill="#FFD700"
+                                                       Margin="1.5,0" RadiusX="1.5" RadiusY="1.5"/>
+                                            <Rectangle x:Name="eqBar3" Width="3" Height="4" Fill="#FFD700"
+                                                       Margin="1.5,0" RadiusX="1.5" RadiusY="1.5"/>
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <!-- 歌名（颜色继承容器的 Foreground，正在播放时变金） -->
+                                    <TextBlock Grid.Column="1" Text="{Binding Title}"
+                                               Margin="10,0,6,0" VerticalAlignment="Center"
+                                               FontSize="13" TextTrimming="CharacterEllipsis"/>
+
+                                    <!-- 时长 -->
+                                    <TextBlock Grid.Column="2" Text="{Binding DurationText}"
+                                               VerticalAlignment="Center" FontSize="11"
+                                               Foreground="#77AAAAAA"/>
+                                </Grid>
+
+                                <DataTemplate.Triggers>
+                                    <!-- 正在播放：♪ 换成跳动的均衡器，文字变金 -->
+                                    <DataTrigger Binding="{Binding IsPlaying}" Value="True">
+                                        <Setter TargetName="noteIcon" Property="Visibility" Value="Collapsed"/>
+                                        <Setter TargetName="equalizer" Property="Visibility" Value="Visible"/>
+                                        <Setter TargetName="iconBg" Property="Background" Value="#33FFD700"/>
+                                        <DataTrigger.EnterActions>
+                                            <BeginStoryboard x:Name="bsEq">
+                                                <Storyboard>
+                                                    <DoubleAnimation Storyboard.TargetName="eqBar1"
+                                                        Storyboard.TargetProperty="Height"
+                                                        From="4" To="15" AutoReverse="True"
+                                                        Duration="0:0:0.32" RepeatBehavior="Forever"/>
+                                                    <DoubleAnimation Storyboard.TargetName="eqBar2"
+                                                        Storyboard.TargetProperty="Height"
+                                                        From="4" To="15" AutoReverse="True"
+                                                        BeginTime="0:0:0.11" Duration="0:0:0.42" RepeatBehavior="Forever"/>
+                                                    <DoubleAnimation Storyboard.TargetName="eqBar3"
+                                                        Storyboard.TargetProperty="Height"
+                                                        From="4" To="15" AutoReverse="True"
+                                                        BeginTime="0:0:0.22" Duration="0:0:0.28" RepeatBehavior="Forever"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </DataTrigger.EnterActions>
+                                        <DataTrigger.ExitActions>
+                                            <RemoveStoryboard BeginStoryboardName="bsEq"/>
+                                        </DataTrigger.ExitActions>
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="Foreground" Value="#E2FFFFFF"/>
+                                <Setter Property="Background">
+                                    <Setter.Value>
+                                        <SolidColorBrush Color="#00FFFFFF"/>
+                                    </Setter.Value>
+                                </Setter>
                                 <Setter Property="BorderThickness" Value="0"/>
-                                <Setter Property="BorderBrush" Value="Transparent"/>
                                 <Setter Property="Focusable" Value="True"/>
-                                <Setter Property="Padding" Value="5, 2"/>
+                                <Setter Property="SnapsToDevicePixels" Value="True"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="ListViewItem">
+                                            <Grid>
+                                                <!-- 悬停高亮层：独立一层做淡入淡出，不会覆盖选中底色 -->
+                                                <Border x:Name="hoverBd" CornerRadius="9" Margin="0,1"
+                                                        IsHitTestVisible="False">
+                                                    <Border.Background>
+                                                        <SolidColorBrush Color="#00FFFFFF"/>
+                                                    </Border.Background>
+                                                </Border>
+                                                <!-- 选中/常驻层：整块底色 + 描边（选中时高亮） -->
+                                                <Border x:Name="card" CornerRadius="9" Margin="0,1"
+                                                        Padding="8,6"
+                                                        Background="{TemplateBinding Background}"
+                                                        BorderBrush="#00FFD700" BorderThickness="1"
+                                                        SnapsToDevicePixels="True">
+                                                    <ContentPresenter/>
+                                                </Border>
+                                            </Grid>
+                                            <ControlTemplate.Triggers>
+                                                <!-- 悬停：柔和浮现 -->
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Trigger.EnterActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard>
+                                                                <ColorAnimation Storyboard.TargetName="hoverBd"
+                                                                    Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                                    To="#1FFFFFFF" Duration="0:0:0.12"/>
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </Trigger.EnterActions>
+                                                    <Trigger.ExitActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard>
+                                                                <ColorAnimation Storyboard.TargetName="hoverBd"
+                                                                    Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                                    To="#00FFFFFF" Duration="0:0:0.25"/>
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </Trigger.ExitActions>
+                                                </Trigger>
+                                                <!-- 选中：整块高亮（金色薄纱底 + 金描边），一眼可辨 -->
+                                                <Trigger Property="IsSelected" Value="True">
+                                                    <Setter TargetName="card" Property="Background" Value="#38FFD700"/>
+                                                    <Setter TargetName="card" Property="BorderBrush" Value="#99FFD700"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
 
                                 <Style.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter Property="Background" Value="#30FFFFFF"/>
-                                    </Trigger>
-
-                                    <Trigger Property="IsSelected" Value="True">
-                                        <Setter Property="Background" Value="#504CAF50"/>
-                                        <Setter Property="Foreground" Value="White"/>
-                                    </Trigger>
-
-                                    <!-- 搜索命中：金色描边 -->
+                                    <!-- 搜索命中：整行染上淡金 -->
                                     <DataTrigger Binding="{Binding IsSearchMatch}" Value="True">
-                                        <Setter Property="BorderBrush" Value="#FFD700"/>
-                                        <Setter Property="BorderThickness" Value="2"/>
-                                        <Setter Property="Background" Value="#50FFD700"/>
+                                        <Setter Property="Foreground" Value="#FFD700"/>
                                     </DataTrigger>
-
                                     <!-- 正在播放：金色加粗 -->
                                     <DataTrigger Binding="{Binding IsPlaying}" Value="True">
                                         <Setter Property="Foreground" Value="#FFD700"/>
@@ -267,69 +985,37 @@
                                     </DataTrigger>
                                 </Style.Triggers>
                             </Style>
-
-                            <Style TargetType="{x:Type ScrollBar}">
-                                <Setter Property="Background" Value="Transparent"/>
-                            </Style>
-
-                            <!-- 表头：透明底，悬停微亮（延续旧版风格） -->
-                            <Style TargetType="GridViewColumnHeader">
-                                <Setter Property="Background" Value="Transparent"/>
-                                <Setter Property="BorderThickness" Value="0"/>
-                                <Setter Property="Foreground" Value="LightGray"/>
-                                <Setter Property="Template">
-                                    <Setter.Value>
-                                        <ControlTemplate TargetType="GridViewColumnHeader">
-                                            <Grid>
-                                                <Border
-                                                    BorderThickness="{TemplateBinding BorderThickness}"
-                                                    BorderBrush="{TemplateBinding BorderBrush}"
-                                                    Background="{TemplateBinding Background}"
-                                                    Padding="{TemplateBinding Padding}">
-                                                    <ContentPresenter
-                                                        Margin="0"
-                                                        RecognizesAccessKey="True"
-                                                        Content="{TemplateBinding Content}"
-                                                        ContentTemplate="{TemplateBinding ContentTemplate}"
-                                                        ContentStringFormat="{TemplateBinding ContentStringFormat}"
-                                                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
-                                                </Border>
-                                            </Grid>
-                                        </ControlTemplate>
-                                    </Setter.Value>
-                                </Setter>
-
-                                <Style.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter Property="Foreground" Value="Silver"/>
-                                    </Trigger>
-                                </Style.Triggers>
-                            </Style>
-                        </ListView.Resources>
-
-                        <ListView.View>
-                            <GridView>
-                                <GridViewColumn Header="歌名" Width="220"
-                                        DisplayMemberBinding="{Binding Title}"/>
-                                <GridViewColumn Header="时长" Width="70"
-                                        DisplayMemberBinding="{Binding DurationText}"/>
-                            </GridView>
-                        </ListView.View>
+                        </ListView.ItemContainerStyle>
                     </ListView>
                 </Grid>
             </Border>
 
             <!-- 列宽拖拽条：调整歌曲列表面板宽度 -->
-            <GridSplitter Grid.Column="2" Width="5"
+            <GridSplitter x:Name="SidebarSplitter" Grid.Column="2" Width="6"
                 HorizontalAlignment="Stretch"
                 ResizeBehavior="PreviousAndNext"
                 ResizeDirection="Columns"
-                Background="#33FFFFFF"/>
+                Background="Transparent">
+                <GridSplitter.Template>
+                    <ControlTemplate TargetType="GridSplitter">
+                        <Grid Background="Transparent">
+                            <Border x:Name="pill" Width="3" CornerRadius="1.5"
+                                    Background="#22FFFFFF" HorizontalAlignment="Center"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="pill" Property="Background" Value="#66FFD700"/>
+                                <Setter TargetName="pill" Property="Width" Value="4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </GridSplitter.Template>
+            </GridSplitter>
 
             <!-- ================= 歌词主区域 ================= -->
             <!-- 只加局部暗色遮罩保证可读，不遮挡全局背景 -->
             <Border Grid.Column="3" Background="#33111118">
+                <Grid>
                 <ScrollViewer x:Name="LyricsScrollViewer"
                     VerticalScrollBarVisibility="Hidden"
                     HorizontalAlignment="Stretch"
@@ -341,19 +1027,52 @@
                         VerticalAlignment="Center"
                         MouseLeftButtonDown="LyricsPanel_MouseLeftButtonDown">
                         <TextBlock Text="暂无歌词"
-                            Foreground="Gray" FontSize="20"
+                            Foreground="#66AAAAAA" FontSize="20"
                             HorizontalAlignment="Center"/>
                     </StackPanel>
                 </ScrollViewer>
+                </Grid>
             </Border>
+
+            <!-- 侧栏收起/展开把手：贴在歌曲栏右缘（展开时）/窗口左缘（收起时）的垂直居中位置 -->
+            <Button x:Name="btnCollapseSidebar" Content="‹"
+                Grid.Column="1" Grid.ColumnSpan="2"
+                HorizontalAlignment="Right" VerticalAlignment="Center"
+                Margin="0,0,-9,0" Panel.ZIndex="20"
+                Width="22" Height="52" Padding="0" FontSize="14"
+                Style="{StaticResource GhostButton}"
+                ToolTip="收起侧栏，歌词铺满（点此或按 S 键）" Cursor="Hand"
+                Click="btnCollapseSidebar_Click"/>
+            <Button x:Name="btnExpandSidebar" Content="›"
+                Grid.Column="0" Grid.ColumnSpan="4"
+                HorizontalAlignment="Left" VerticalAlignment="Center"
+                Margin="0,0,0,0" Panel.ZIndex="20"
+                Width="22" Height="52" Padding="0" FontSize="14"
+                Style="{StaticResource GhostButton}"
+                Visibility="Collapsed"
+                ToolTip="展开侧栏（点此或按 S 键）" Cursor="Hand"
+                Click="btnExpandSidebar_Click"/>
         </Grid>
 
-        <!-- ================= 底部播放条（通栏） ================= -->
-        <Border Grid.Row="1" Background="#CC18181B" Padding="12,6">
+        <!-- 应用内轻提示（替代系统 MessageBox 弹窗）：主区顶部居中，淡入停留淡出 -->
+        <Border x:Name="toastBorder" Grid.Row="1" Panel.ZIndex="100"
+            HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0"
+            Background="#F21E1E28" BorderBrush="#33FFFFFF" BorderThickness="1"
+            CornerRadius="10" Padding="18,10"
+            Visibility="Collapsed" IsHitTestVisible="False">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="16" ShadowDepth="2" Opacity="0.5"/>
+            </Border.Effect>
+            <TextBlock x:Name="txtToast" Foreground="#F2FFFFFF" FontSize="13"/>
+        </Border>
+
+        <!-- ================= 底部播放条（通栏悬浮卡片） ================= -->
+        <Border Grid.Row="2" Background="#F218181F" Padding="14,8">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="18" ShadowDepth="2" Opacity="0.5"/>
+            </Border.Effect>
             <Grid>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/> <!-- 旋转封面 -->
-                    <ColumnDefinition Width="Auto"/> <!-- 当前歌名 -->
                     <ColumnDefinition Width="*"/>    <!-- 进度条 + 时间 -->
                     <ColumnDefinition Width="Auto"/> <!-- 上一首/播放/下一首 -->
                     <ColumnDefinition Width="Auto"/> <!-- 播放方式 -->
@@ -361,34 +1080,8 @@
                     <ColumnDefinition Width="Auto"/> <!-- 歌词开关 -->
                 </Grid.ColumnDefinitions>
 
-                <!-- 旋转封面小圆盘：点击选择封面图片（保留旧功能） -->
-                <Viewbox Grid.Column="0" Width="52" Height="52"
-                    VerticalAlignment="Center">
-                    <Grid x:Name="VisualizerGrid" Width="100" Height="100"
-                        MouseLeftButtonDown="VisualizerGrid_MouseLeftButtonDown">
-                        <Grid.RenderTransform>
-                            <RotateTransform x:Name="RotationTransform" CenterX="50" CenterY="50"/>
-                        </Grid.RenderTransform>
-
-                        <Ellipse Fill="#FF333333" Width="100" Height="100"/>
-                        <Ellipse Stroke="Silver" StrokeThickness="1" Width="100" Height="100">
-                            <Ellipse.Fill>
-                                <ImageBrush x:Name="AlbumCoverBrush" Stretch="UniformToFill"/>
-                            </Ellipse.Fill>
-                        </Ellipse>
-                        <Ellipse Fill="Transparent" Stroke="Silver" StrokeThickness="1" Width="10" Height="10"/>
-                    </Grid>
-                </Viewbox>
-
-                <!-- 当前歌名 -->
-                <TextBlock x:Name="txtNowPlaying"
-                    Grid.Column="1" Margin="12,0"
-                    VerticalAlignment="Center"
-                    MaxWidth="200" TextTrimming="CharacterEllipsis"
-                    Foreground="White" FontSize="14" FontWeight="SemiBold"/>
-
                 <!-- 进度条 + 时间 -->
-                <Grid Grid.Column="2" VerticalAlignment="Center" Margin="0,0,10,0">
+                <Grid Grid.Column="0" VerticalAlignment="Center" Margin="2,0,14,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
@@ -397,60 +1090,65 @@
                     <Slider x:Name="sliderProgress"
                         Grid.Row="0"
                         Minimum="0" Value="0"
+                        Style="{StaticResource ModernSlider}"
                         IsMoveToPointEnabled="True"
                         Thumb.DragStarted="sliderProgress_DragStarted"
                         Thumb.DragCompleted="sliderProgress_DragCompleted"
+                        PreviewMouseLeftButtonDown="sliderProgress_PreviewMouseLeftButtonDown"
                         PreviewMouseUp="sliderProgress_PreviewMouseUp"/>
 
                     <Grid Grid.Row="1" Margin="2,0">
-                        <TextBlock x:Name="txtCurrentTime" Text="00:00" Foreground="LightGray"
+                        <TextBlock x:Name="txtCurrentTime" Text="00:00" Foreground="#99AAAAAA"
                             HorizontalAlignment="Left" FontSize="11"/>
-                        <TextBlock x:Name="txtTotalTime" Text="00:00" Foreground="LightGray"
+                        <TextBlock x:Name="txtTotalTime" Text="00:00" Foreground="#99AAAAAA"
                             HorizontalAlignment="Right" FontSize="11"/>
                     </Grid>
                 </Grid>
 
                 <!-- 上一首 / 播放暂停 / 下一首 -->
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="btnPrevious" Content="⏮️" Padding="8,4" Margin="4"
-                        Background="Transparent" BorderThickness="0" FontSize="16"
-                        Click="btnPrevious_Click" ToolTip="上一首 (Ctrl+←)" Cursor="Hand"/>
-                    <Button x:Name="btnPlayPause" Content="▶️" Padding="8,4" Margin="4"
-                        Background="Transparent" BorderThickness="0" FontSize="16"
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0">
+                    <Button x:Name="btnPrevious" Content="⏮" Padding="0" Margin="3,0"
+                        Style="{StaticResource GhostButton}" FontSize="14"
+                        Width="38" Height="38"
+                        Click="btnPrevious_Click" ToolTip="上一首 (Ctrl+A)" Cursor="Hand"/>
+                    <Button x:Name="btnPlayPause" Content="▶️" Padding="0" Margin="6,0"
+                        Style="{StaticResource AccentCircleButton}" FontSize="17"
                         Click="btnPlayPause_Click" ToolTip="播放/暂停 (空格)" Cursor="Hand"/>
-                    <Button x:Name="btnNext" Content="⏭️" Padding="8,4" Margin="4"
-                        Background="Transparent" BorderThickness="0" FontSize="16"
-                        Click="btnNext_Click" ToolTip="下一首 (Ctrl+→)" Cursor="Hand"/>
+                    <Button x:Name="btnNext" Content="⏭" Padding="0" Margin="3,0"
+                        Style="{StaticResource GhostButton}" FontSize="14"
+                        Width="38" Height="38"
+                        Click="btnNext_Click" ToolTip="下一首 (Ctrl+D)" Cursor="Hand"/>
                 </StackPanel>
 
                 <!-- 播放方式：随机 / 顺序 / 单曲循环 三态循环切换 -->
-                <Button Grid.Column="4" x:Name="btnPlayMode" Content="🔁"
-                    Padding="8,4" Margin="8,0,4,0"
-                    Background="Transparent" BorderThickness="0" FontSize="16"
+                <Button Grid.Column="2" x:Name="btnPlayMode" Content="🔁"
+                    Padding="0" Margin="6,0,0,0" Width="38" Height="38"
+                    Style="{StaticResource GhostButton}" FontSize="14"
                     Click="btnPlayMode_Click"
                     ToolTip="播放方式：顺序 → 随机 → 单曲循环" Cursor="Hand"/>
 
                 <!-- 音量：静音切换 + 滑块 -->
-                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="btnMute" Content="🔊"
-                        Padding="4,4" Margin="4,0"
-                        Background="Transparent" BorderThickness="0" FontSize="14"
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+                    <Button x:Name="btnMute" Content="🔊" Padding="0"
+                        Style="{StaticResource GhostButton}" FontSize="13"
+                        Width="34" Height="34" Margin="0,0,4,0"
                         Click="btnMute_Click" ToolTip="静音/取消静音 (M)" Cursor="Hand"/>
                     <Slider x:Name="sliderVolume"
                         Width="90" Minimum="0" Maximum="100" Value="100"
+                        Style="{StaticResource ModernSlider}"
                         VerticalAlignment="Center"
                         ValueChanged="sliderVolume_ValueChanged"
-                        ToolTip="音量 (↑/↓)"/>
+                        ToolTip="音量（Ctrl+W 加 / Ctrl+S 减，M 静音）"/>
                 </StackPanel>
 
                 <!-- 桌面歌词开关（保留旧功能） -->
-                <Button Grid.Column="6" x:Name="btnToggleLyrics"
-                    Width="30" Height="30" Margin="8,0,0,0"
-                    Background="Transparent" BorderThickness="0"
+                <Button Grid.Column="4" x:Name="btnToggleLyrics"
+                    Style="{StaticResource GhostButton}"
+                    Width="34" Height="34" Margin="10,0,0,0" Padding="0"
                     Click="btnToggleLyrics_Click" ToolTip="切换桌面歌词显示 (L)" Cursor="Hand">
-                    <TextBlock Text="词" FontSize="15" FontWeight="Bold"
+                    <TextBlock Text="词" FontSize="14" FontWeight="Bold"
                         VerticalAlignment="Center" HorizontalAlignment="Center"
-                        Foreground="White"/>
+                        Foreground="#CCFFFFFF"/>
                 </Button>
             </Grid>
         </Border>

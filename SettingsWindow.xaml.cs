@@ -22,6 +22,10 @@ namespace musicPlayer
         public SettingsWindow(MainWindow owner)
         {
             InitializeComponent();
+
+            // Win11 系统级圆角（句柄创建完成后应用；Win10 静默忽略保持方形）
+            SourceInitialized += (_, _) => WindowEffects.ApplyRoundedCorners(this);
+
             this.owner = owner;
 
             volumeSaveTimer = new System.Windows.Threading.DispatcherTimer
@@ -74,6 +78,11 @@ namespace musicPlayer
             }
             UpdateDefaultVolumeLabel();
 
+            // 关闭行为（默认最小化到托盘）
+            bool closeToTray = Db.GetSetting("close_action", "tray") != "exit";
+            rbCloseToTray.IsChecked = closeToTray;
+            rbCloseExit.IsChecked = !closeToTray;
+
             // 数据库位置
             txtDbPath.Text = Db.DbPath;
         }
@@ -97,8 +106,7 @@ namespace musicPlayer
 
             if (!Db.AddMusicFolder(dialog.SelectedPath))
             {
-                MessageBox.Show("该文件夹已在列表中。", "添加文件夹",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
+                ShowStatusLine("该文件夹已在列表中。");
                 return;
             }
 
@@ -111,9 +119,7 @@ namespace musicPlayer
                 {
                     SetScanUi(false, "");
                     owner.ReloadAfterLibraryScan();
-                    MessageBox.Show(
-                        $"扫描完成：新增 {p.Added} 首，更新 {p.Updated} 首。",
-                        "添加文件夹", MessageBoxButton.OK, MessageBoxImage.Information);
+                    ShowStatusLine($"扫描完成：新增 {p.Added} 首，更新 {p.Updated} 首。");
                 }
             });
             SetScanUi(true, "正在扫描新文件夹…");
@@ -151,12 +157,9 @@ namespace musicPlayer
                     owner.ReloadAfterLibraryScan();
 
                     // 取消的扫描没有做失效清理（避免误删还没扫到的记录）
-                    MessageBox.Show(
-                        p.Cancelled
-                            ? "扫描已取消（本次未清理失效记录）。"
-                            : $"扫描完成：新增 {p.Added} 首，更新 {p.Updated} 首，清理失效 {p.Removed} 首。",
-                        "重新扫描", MessageBoxButton.OK,
-                        p.Cancelled ? MessageBoxImage.Warning : MessageBoxImage.Information);
+                    ShowStatusLine(p.Cancelled
+                        ? "扫描已取消（本次未清理失效记录）。"
+                        : $"扫描完成：新增 {p.Added} 首，更新 {p.Updated} 首，清理失效 {p.Removed} 首。");
                 }
             });
 
@@ -167,12 +170,24 @@ namespace musicPlayer
         private void btnCancelScan_Click(object sender, RoutedEventArgs e)
             => LibraryService.CancelScan();
 
+        /// <summary>
+        /// 在扫描进度区显示一条结果/提示文字（进度条隐藏，只留文字）。
+        /// 替代系统 MessageBox 弹窗——扫描结果留在原地看完即走，不打断操作。
+        /// </summary>
+        private void ShowStatusLine(string text)
+        {
+            panelScanProgress.Visibility = Visibility.Visible;
+            progressScan.Visibility = Visibility.Collapsed;
+            txtScanStatus.Text = text;
+        }
+
         /// <summary>扫描时禁用相关按钮 + 显示进度区；结束后恢复。</summary>
         private void SetScanUi(bool scanning, string statusText)
         {
             Dispatcher.Invoke(() =>
             {
                 panelScanProgress.Visibility = scanning ? Visibility.Visible : Visibility.Collapsed;
+                progressScan.Visibility = Visibility.Visible; // 扫描时恢复进度条（结果提示态会隐藏它）
                 txtScanStatus.Text = statusText;
                 foreach (var child in FindVisualChildren<Button>(this))
                 {
@@ -275,6 +290,14 @@ namespace musicPlayer
             // 防抖：停顿后才真正写库并应用到主窗口
             volumeSaveTimer.Stop();
             volumeSaveTimer.Start();
+        }
+
+        /// <summary>关闭行为单选切换：写库即时生效（窗口未加载完成时的触发忽略）。</summary>
+        private void CloseAction_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+
+            Db.SetSetting("close_action", rbCloseExit.IsChecked == true ? "exit" : "tray");
         }
 
         // =====================================================================
