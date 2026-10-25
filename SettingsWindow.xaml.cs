@@ -131,11 +131,9 @@ namespace musicPlayer
         {
             if (listFolders.SelectedItem is not string folder) return;
 
-            var result = MessageBox.Show(
-                $"确定移除文件夹「{folder}」吗？\n\n" +
-                "（只是不再扫描这个位置，已入库的歌曲和物理文件不会被删除）",
-                "移除文件夹", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (result != MessageBoxResult.Yes) return;
+            if (!ConfirmDialog.Confirm(this, "移除文件夹",
+                $"确定移除文件夹「{folder}」吗？\n只是不再扫描这个位置，已入库的歌曲和物理文件不会被删除。", "移除"))
+                return;
 
             Db.RemoveMusicFolder(folder);
             listFolders.Items.Remove(folder);
@@ -231,8 +229,8 @@ namespace musicPlayer
 
         private void btnClearLyricsFolder_Click(object sender, RoutedEventArgs e)
         {
-            if (MessageBox.Show("确定清除歌词文件夹设置吗？", "清除",
-                    MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            if (!ConfirmDialog.Confirm(this, "清除歌词文件夹设置",
+                "确定清除歌词文件夹设置吗？", "清除", danger: false))
                 return;
 
             LyricService.SetLyricsFolder("");

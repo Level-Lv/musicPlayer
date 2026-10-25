@@ -469,14 +469,16 @@ namespace musicPlayer
 
         /// <summary>右键删除歌单（二次确认，只删歌单和关联，不删歌曲/物理文件）。</summary>
         private void PlaylistDelete_Click(object sender, RoutedEventArgs e)
+            => DeletePlaylistWithConfirm(contextMenuPlaylist);
+
+        /// <summary>删除歌单：应用风格确认弹窗 + 落库 + 界面回退（右键菜单和 Delete 键共用）。</summary>
+        private void DeletePlaylistWithConfirm(PlaylistItem? item)
         {
-            var item = contextMenuPlaylist;
             if (item == null) return;
 
-            var result = MessageBox.Show(
-                $"确定删除歌单「{item.Name}」吗？\n（歌曲本身不会被删除）",
-                "删除歌单", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (result != MessageBoxResult.Yes) return;
+            if (!ConfirmDialog.Confirm(this, "删除歌单",
+                $"确定删除歌单「{item.Name}」吗？\n只删除歌单本身，歌曲和音乐文件都不受影响。", "删除"))
+                return;
 
             Db.DeletePlaylist(item.Id);
             LoadPlaylists();
@@ -891,10 +893,9 @@ namespace musicPlayer
             var tracks = musicfilesListView.SelectedItems.Cast<TrackItem>().ToList();
             if (tracks.Count == 0) return;
 
-            var result = MessageBox.Show(
-                $"确定从音乐库移除 {tracks.Count} 首歌曲吗？\n（只移除记录，不会删除音乐文件）",
-                "从库中移除", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (result != MessageBoxResult.Yes) return;
+            if (!ConfirmDialog.Confirm(this, "从库中移除",
+                $"确定从音乐库移除 {tracks.Count} 首歌曲吗？\n只移除记录，音乐文件不会被删除。", "移除"))
+                return;
 
             bool removingCurrent = tracks.Any(t => currentTrack != null && t.FullPath == currentTrack.FullPath);
 
@@ -1770,7 +1771,17 @@ namespace musicPlayer
                     e.Handled = true;
                     break;
 
-                case Key.Delete: // 从当前歌单移除选中歌曲
+                case Key.Delete:
+                    // 焦点在歌单方块列表上 → 删除选中的歌单
+                    if (PlaylistsList.IsKeyboardFocusWithin)
+                    {
+                        if (PlaylistsList.SelectedItem is PlaylistItem playlist)
+                            DeletePlaylistWithConfirm(playlist);
+                        e.Handled = true;
+                        break;
+                    }
+
+                    // 否则：从当前歌单移除选中歌曲
                     if (currentPlaylistId != 0)
                     {
                         menuRemoveFromPlaylist_Click(null, new RoutedEventArgs());

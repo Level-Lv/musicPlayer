@@ -64,7 +64,8 @@ namespace musicPlayer.Data
                 if (trimmed.Length == 0) return "?";
 
                 // 处理 Emoji 等代理对字符，取第一个完整文本元素
-                if (char.IsSurrogatePair(trimmed[0], trimmed[1]))
+                //（注意长度为 1 时 trimmed[1] 会越界，必须先判长度）
+                if (trimmed.Length >= 2 && char.IsSurrogatePair(trimmed[0], trimmed[1]))
                 {
                     return trimmed.Substring(0, 2);
                 }
