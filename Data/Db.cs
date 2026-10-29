@@ -23,8 +23,11 @@ namespace musicPlayer.Data
         /// <summary>数据库文件完整路径（初始化后可读，用于设置页展示）。</summary>
         public static string DbPath { get; private set; } = "";
 
-        /// <summary>当前数据库结构版本，结构变更时递增并补充迁移逻辑。</summary>
-        private const int SchemaVersion = 1;
+        /// <summary>
+        /// 当前数据库结构版本，结构变更时递增并补充迁移逻辑。
+        /// v1：本地曲库（tracks/playlists/...）；v2：在线曲库（online_sites/downloads + tracks.source）。
+        /// </summary>
+        private const int SchemaVersion = 2;
 
         /// <summary>旧版 setting.json 文件名。</summary>
         private const string LegacySettingsFileName = "setting.json";
@@ -55,6 +58,7 @@ namespace musicPlayer.Data
                 ExecuteNonQuery(conn, "PRAGMA journal_mode = WAL;");
 
                 CreateTables(conn);
+                MigrateTracksColumns(conn); // v1 → v2：tracks 扩列（在线来源标记）
                 ExecuteNonQuery(conn,
                     $"INSERT OR IGNORE INTO schema_version (version) VALUES ({SchemaVersion});");
 
@@ -131,6 +135,60 @@ namespace musicPlayer.Data
                 CREATE TABLE IF NOT EXISTS schema_version (
                     version INTEGER NOT NULL
                 );");
+
+            // 在线站点配置（《在线曲库 PRD》第 6 章）
+            ExecuteNonQuery(conn, @"
+                CREATE TABLE IF NOT EXISTS online_sites (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name              TEXT NOT NULL,
+                    search_template   TEXT NOT NULL,
+                    page_template     TEXT,
+                    selectors         TEXT NOT NULL DEFAULT '{}',
+                    status            TEXT NOT NULL DEFAULT 'ok',
+                    cookie_updated_at INTEGER NOT NULL DEFAULT 0,
+                    created_at        INTEGER NOT NULL DEFAULT 0
+                );");
+
+            // 下载队列记录：只服务队列管理与状态恢复，不提供历史浏览界面
+            ExecuteNonQuery(conn, @"
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    site_id    INTEGER NOT NULL DEFAULT 0,
+                    title      TEXT NOT NULL DEFAULT '',
+                    artist     TEXT,
+                    audio_url  TEXT NOT NULL,
+                    file_path  TEXT,
+                    status     TEXT NOT NULL DEFAULT 'pending',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    error      TEXT,
+                    created_at INTEGER NOT NULL DEFAULT 0
+                );");
+        }
+
+        /// <summary>
+        /// v1 → v2 迁移：给 tracks 补 source / source_url 两列。
+        /// 幂等——先查 PRAGMA table_info，缺哪列补哪列，旧库重复启动不会报错。
+        /// </summary>
+        private static void MigrateTracksColumns(SqliteConnection conn)
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA table_info(tracks);";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) columns.Add(reader.GetString(1)); // 第 1 列是列名
+            }
+
+            if (!columns.Contains("source"))
+            {
+                ExecuteNonQuery(conn,
+                    "ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'local';");
+            }
+
+            if (!columns.Contains("source_url"))
+            {
+                ExecuteNonQuery(conn, "ALTER TABLE tracks ADD COLUMN source_url TEXT;");
+            }
         }
 
         #endregion
@@ -337,10 +395,12 @@ namespace musicPlayer.Data
         /// <summary>
         /// 按路径新增或更新一首曲目（去重的关键：path UNIQUE + ON CONFLICT 处理）。
         /// lastSeen 传扫描会话号（见 LibraryService.RescanAll），用于失效清理。
+        /// source / sourceUrl 仅在**首次插入**时写入：本地重扫不会把"在线下载"的曲目改回 local。
         /// 返回 (曲目 id, 是否为新增)。
         /// </summary>
         public static (long Id, bool Inserted) UpsertTrack(string path, string title,
-            long durationMs, string format, long mtime, long lastSeen)
+            long durationMs, string format, long mtime, long lastSeen,
+            string source = "local", string? sourceUrl = null)
         {
             using var conn = OpenConnection();
 
@@ -349,11 +409,15 @@ namespace musicPlayer.Data
             {
                 cmd.CommandText = @"
                     INSERT INTO tracks (path, file_name, title, duration_ms, format,
-                                        mtime, created_at, updated_at, last_seen_at)
+                                        mtime, created_at, updated_at, last_seen_at,
+                                        source, source_url)
                     VALUES (@path, @fileName, @title, @durationMs, @format,
-                            @mtime, @now, @now, @lastSeen)
+                            @mtime, @now, @now, @lastSeen,
+                            @source, @sourceUrl)
                     ON CONFLICT(path) DO NOTHING;";
                 BindTrackParams(cmd.Parameters, path, title, durationMs, format, mtime, lastSeen);
+                cmd.Parameters.AddWithValue("@source", source);
+                cmd.Parameters.AddWithValue("@sourceUrl", (object?)sourceUrl ?? DBNull.Value);
                 cmd.ExecuteNonQuery();
             }
 
@@ -427,7 +491,7 @@ namespace musicPlayer.Data
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT id, path, title, duration_ms, format
+                SELECT id, path, title, duration_ms, format, source, source_url
                 FROM tracks;";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -438,7 +502,9 @@ namespace musicPlayer.Data
                     FullPath = reader.GetString(1),
                     Title = reader.GetString(2),
                     Duration = TimeSpan.FromMilliseconds(reader.GetInt64(3)),
-                    Format = reader.GetString(4)
+                    Format = reader.GetString(4),
+                    Source = reader.IsDBNull(5) ? "local" : reader.GetString(5),
+                    SourceUrl = reader.IsDBNull(6) ? null : reader.GetString(6)
                 });
             }
             return list;
@@ -449,7 +515,7 @@ namespace musicPlayer.Data
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT id, path, title, duration_ms, format
+                SELECT id, path, title, duration_ms, format, source, source_url
                 FROM tracks WHERE path = @path;";
             cmd.Parameters.AddWithValue("@path", path);
             using var reader = cmd.ExecuteReader();
@@ -460,7 +526,9 @@ namespace musicPlayer.Data
                 FullPath = reader.GetString(1),
                 Title = reader.GetString(2),
                 Duration = TimeSpan.FromMilliseconds(reader.GetInt64(3)),
-                Format = reader.GetString(4)
+                Format = reader.GetString(4),
+                Source = reader.IsDBNull(5) ? "local" : reader.GetString(5),
+                SourceUrl = reader.IsDBNull(6) ? null : reader.GetString(6)
             };
         }
 
@@ -599,7 +667,7 @@ namespace musicPlayer.Data
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT t.id, t.path, t.title, t.duration_ms, t.format
+                SELECT t.id, t.path, t.title, t.duration_ms, t.format, t.source, t.source_url
                 FROM tracks t
                 JOIN playlist_tracks pt ON pt.track_id = t.id
                 WHERE pt.playlist_id = @playlistId
@@ -614,7 +682,9 @@ namespace musicPlayer.Data
                     FullPath = reader.GetString(1),
                     Title = reader.GetString(2),
                     Duration = TimeSpan.FromMilliseconds(reader.GetInt64(3)),
-                    Format = reader.GetString(4)
+                    Format = reader.GetString(4),
+                    Source = reader.IsDBNull(5) ? "local" : reader.GetString(5),
+                    SourceUrl = reader.IsDBNull(6) ? null : reader.GetString(6)
                 });
             }
             return list;
@@ -628,6 +698,224 @@ namespace musicPlayer.Data
                 SELECT 1 FROM playlist_tracks
                 WHERE playlist_id = @playlistId AND track_id = @trackId LIMIT 1;",
                 p => { p.AddWithValue("@playlistId", playlistId); p.AddWithValue("@trackId", trackId); }) != null;
+        }
+
+        #endregion
+
+        #region online_sites 在线站点
+
+        /// <summary>读取全部在线站点（按添加顺序）。</summary>
+        public static List<OnlineSite> GetOnlineSites()
+        {
+            var list = new List<OnlineSite>();
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT id, name, search_template, page_template, selectors,
+                       status, cookie_updated_at, created_at
+                FROM online_sites ORDER BY id;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) list.Add(ReadOnlineSite(reader));
+            return list;
+        }
+
+        /// <summary>按 id 读取单个站点（不存在返回 null）。</summary>
+        public static OnlineSite? GetOnlineSite(long id)
+        {
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT id, name, search_template, page_template, selectors,
+                       status, cookie_updated_at, created_at
+                FROM online_sites WHERE id = @id;";
+            cmd.Parameters.AddWithValue("@id", id);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadOnlineSite(reader) : null;
+        }
+
+        /// <summary>新增站点，返回新 id。</summary>
+        public static long AddOnlineSite(OnlineSite site)
+        {
+            using var conn = OpenConnection();
+            var id = ExecuteScalar(conn, @"
+                INSERT INTO online_sites
+                    (name, search_template, page_template, selectors, status,
+                     cookie_updated_at, created_at)
+                VALUES (@name, @template, @pageTemplate, @selectors, @status, 0, @now)
+                RETURNING id;",
+                p =>
+                {
+                    p.AddWithValue("@name", site.Name);
+                    p.AddWithValue("@template", site.SearchTemplate);
+                    p.AddWithValue("@pageTemplate", (object?)site.PageTemplate ?? DBNull.Value);
+                    p.AddWithValue("@selectors", SerializeSelectors(site.Selectors));
+                    p.AddWithValue("@status", site.Status);
+                    p.AddWithValue("@now", Now());
+                });
+            return Convert.ToInt64(id);
+        }
+
+        /// <summary>更新站点的名称/模板/选择器/状态（Cookie 时间戳另有专用方法）。</summary>
+        public static void UpdateOnlineSite(OnlineSite site)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn, @"
+                UPDATE online_sites SET
+                    name            = @name,
+                    search_template = @template,
+                    page_template   = @pageTemplate,
+                    selectors       = @selectors,
+                    status          = @status
+                WHERE id = @id;",
+                p =>
+                {
+                    p.AddWithValue("@name", site.Name);
+                    p.AddWithValue("@template", site.SearchTemplate);
+                    p.AddWithValue("@pageTemplate", (object?)site.PageTemplate ?? DBNull.Value);
+                    p.AddWithValue("@selectors", SerializeSelectors(site.Selectors));
+                    p.AddWithValue("@status", site.Status);
+                    p.AddWithValue("@id", site.Id);
+                });
+        }
+
+        /// <summary>只更新状态（搜索失败/需登录/自愈时用）。</summary>
+        public static void SetOnlineSiteStatus(long siteId, string status)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn, "UPDATE online_sites SET status = @status WHERE id = @id;",
+                p => { p.AddWithValue("@status", status); p.AddWithValue("@id", siteId); });
+        }
+
+        /// <summary>标记站点 Cookie 刚更新（一次性登录/验证通过后调用）。</summary>
+        public static void TouchOnlineSiteCookie(long siteId)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn,
+                "UPDATE online_sites SET cookie_updated_at = @now WHERE id = @id;",
+                p => { p.AddWithValue("@now", Now()); p.AddWithValue("@id", siteId); });
+        }
+
+        /// <summary>删除站点（配置随之消失；已下载的音乐文件与 tracks 记录保留）。</summary>
+        public static void DeleteOnlineSite(long siteId)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn, "DELETE FROM online_sites WHERE id = @id;",
+                p => p.AddWithValue("@id", siteId));
+        }
+
+        private static OnlineSite ReadOnlineSite(SqliteDataReader reader) => new OnlineSite
+        {
+            Id = reader.GetInt64(0),
+            Name = reader.GetString(1),
+            SearchTemplate = reader.GetString(2),
+            PageTemplate = reader.IsDBNull(3) ? null : reader.GetString(3),
+            Selectors = DeserializeSelectors(reader.IsDBNull(4) ? null : reader.GetString(4)),
+            Status = reader.GetString(5),
+            CookieUpdatedAt = reader.GetInt64(6),
+            CreatedAt = reader.GetInt64(7)
+        };
+
+        /// <summary>选择器 JSON 序列化（紧凑格式，便于直接入库排查）。</summary>
+        private static string SerializeSelectors(SiteSelectors selectors) =>
+            JsonSerializer.Serialize(selectors);
+
+        /// <summary>选择器 JSON 反序列化；脏数据不抛异常，退化为空配置。</summary>
+        private static SiteSelectors DeserializeSelectors(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new SiteSelectors();
+            try
+            {
+                return JsonSerializer.Deserialize<SiteSelectors>(json) ?? new SiteSelectors();
+            }
+            catch (JsonException)
+            {
+                return new SiteSelectors();
+            }
+        }
+
+        #endregion
+
+        #region downloads 下载队列
+
+        /// <summary>插入一条下载任务，返回任务 id。</summary>
+        public static long InsertDownload(DownloadRecord record)
+        {
+            using var conn = OpenConnection();
+            var id = ExecuteScalar(conn, @"
+                INSERT INTO downloads
+                    (site_id, title, artist, audio_url, file_path, status,
+                     size_bytes, error, created_at)
+                VALUES (@siteId, @title, @artist, @audioUrl, @filePath, @status,
+                        @sizeBytes, @error, @now)
+                RETURNING id;",
+                p =>
+                {
+                    p.AddWithValue("@siteId", record.SiteId);
+                    p.AddWithValue("@title", record.Title);
+                    p.AddWithValue("@artist", (object?)record.Artist ?? DBNull.Value);
+                    p.AddWithValue("@audioUrl", record.AudioUrl);
+                    p.AddWithValue("@filePath", (object?)record.FilePath ?? DBNull.Value);
+                    p.AddWithValue("@status", record.Status);
+                    p.AddWithValue("@sizeBytes", record.SizeBytes);
+                    p.AddWithValue("@error", (object?)record.Error ?? DBNull.Value);
+                    p.AddWithValue("@now", Now());
+                });
+            return Convert.ToInt64(id);
+        }
+
+        /// <summary>更新下载任务状态（完成时补 file_path / size_bytes，失败时补 error）。</summary>
+        public static void UpdateDownload(long downloadId, string status,
+            string? filePath = null, long sizeBytes = 0, string? error = null)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn, @"
+                UPDATE downloads SET
+                    status     = @status,
+                    file_path  = COALESCE(@filePath, file_path),
+                    size_bytes = CASE WHEN @sizeBytes > 0 THEN @sizeBytes ELSE size_bytes END,
+                    error      = @error
+                WHERE id = @id;",
+                p =>
+                {
+                    p.AddWithValue("@status", status);
+                    p.AddWithValue("@filePath", (object?)filePath ?? DBNull.Value);
+                    p.AddWithValue("@sizeBytes", sizeBytes);
+                    p.AddWithValue("@error", (object?)error ?? DBNull.Value);
+                    p.AddWithValue("@id", downloadId);
+                });
+        }
+
+        /// <summary>
+        /// 取未完成的任务（pending / running）。
+        /// 程序异常退出后残留的 running 由调用方（DownloadService）重置为 failed。
+        /// </summary>
+        public static List<DownloadRecord> GetActiveDownloads()
+        {
+            var list = new List<DownloadRecord>();
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT id, site_id, title, artist, audio_url, file_path,
+                       status, size_bytes, error, created_at
+                FROM downloads WHERE status IN ('pending', 'running') ORDER BY id;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                list.Add(new DownloadRecord
+                {
+                    Id = reader.GetInt64(0),
+                    SiteId = reader.GetInt64(1),
+                    Title = reader.GetString(2),
+                    Artist = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    AudioUrl = reader.GetString(4),
+                    FilePath = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    Status = reader.GetString(6),
+                    SizeBytes = reader.GetInt64(7),
+                    Error = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    CreatedAt = reader.GetInt64(9)
+                });
+            }
+            return list;
         }
 
         #endregion
