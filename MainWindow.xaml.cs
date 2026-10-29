@@ -1,4 +1,5 @@
-﻿using System;
+﻿// all done ver1.0
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -85,6 +86,9 @@ namespace musicPlayer
 
             // Win11 系统级圆角（句柄创建完成后应用；Win10 静默忽略保持方形）
             SourceInitialized += (_, _) => WindowEffects.ApplyRoundedCorners(this);
+
+            // 在线曲库前置环境自检（WebView2 Runtime / ffmpeg），缺失仅提示不阻塞本地功能
+            _ = CheckOnlineEnvironmentAsync();
 
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
@@ -1573,6 +1577,26 @@ namespace musicPlayer
         #region 应用内轻提示（Toast）
 
         private System.Windows.Threading.DispatcherTimer? toastTimer;
+
+        /// <summary>
+        /// 在线曲库前置环境自检：WebView2 Runtime 与 ffmpeg 组件。
+        /// 任一缺失仅 Toast 提示（在线功能后续禁用），不影响本地功能使用。
+        /// </summary>
+        private async System.Threading.Tasks.Task CheckOnlineEnvironmentAsync()
+        {
+            var runtimeVersion = await OnlineEnvironment.GetWebView2VersionAsync();
+            if (runtimeVersion == null)
+            {
+                ShowToast("未检测到 WebView2 运行时，在线曲库功能不可用", warning: true);
+                return;
+            }
+            Debug.WriteLine($"[OnlineEnv] WebView2 Runtime: {runtimeVersion}");
+
+            if (!OnlineEnvironment.FfmpegAvailable)
+            {
+                ShowToast("缺少 ffmpeg 组件，在线下载功能不可用", warning: true);
+            }
+        }
 
         /// <summary>
         /// 应用内轻提示：主区顶部居中淡入，停留约 2.4 秒后淡出。

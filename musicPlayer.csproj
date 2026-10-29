@@ -11,12 +11,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
     <PackageReference Include="taglib-sharp-netstandard2.0" Version="2.1.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
   </ItemGroup>
 
   <ItemGroup>
     <Folder Include="image\" />
+  </ItemGroup>
+
+  <!-- ffmpeg 随构建输出（在线曲库 HLS/DASH 下载合并用，见《在线曲库 PRD》F6.1/F6.2） -->
+  <ItemGroup>
+    <None Include="Assets\ffmpeg\*.exe" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
