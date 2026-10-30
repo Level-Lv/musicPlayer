@@ -364,3 +364,8 @@ FodyWeavers.xsd
 
 # ffmpeg 二进制（体积过大不入库，获取方式见 Assets/ffmpeg/README.md）
 Assets/ffmpeg/*.exe
+
+# 忽略开发用的文档和记忆文件
+在线曲库 PRD.md
+在线曲库开发步骤清单.md
+.workbuddy/
