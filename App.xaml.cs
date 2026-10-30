@@ -20,6 +20,22 @@ namespace musicPlayer
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            // 全局异常日志：任何未处理异常都落到 %TEMP%\musicplayer_crash.log，便于事后诊断
+            //（TODO: S10 收尾时决定是否保留/移到正式日志目录）
+            LogCrash("===== 启动 =====");
+            DispatcherUnhandledException += (_, args) =>
+            {
+                LogCrash("UI线程异常: " + args.Exception);
+                args.Handled = true; // 开发期先兜住不让程序消失，便于排查
+            };
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+                LogCrash("非UI线程异常: " + args.ExceptionObject);
+            System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, args) =>
+            {
+                LogCrash("未观察Task异常: " + args.Exception);
+                args.SetObserved();
+            };
+
             instanceMutex = new Mutex(initiallyOwned: true, MutexName, out bool createdNew);
 
             if (!createdNew)
@@ -70,6 +86,22 @@ namespace musicPlayer
             var main = new MainWindow();
             Current.MainWindow = main; // StartupUri 已移除，手动指定主窗口
             main.Show();
+        }
+
+        /// <summary>把异常文本追加到 %TEMP%\musicplayer_crash.log。</summary>
+        private static void LogCrash(string message)
+        {
+            try
+            {
+                string file = System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(), "musicplayer_crash.log");
+                System.IO.File.AppendAllText(file,
+                    $"\r\n[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}\r\n");
+            }
+            catch
+            {
+                // 日志失败不能影响运行
+            }
         }
 
         /// <summary>收到第二实例的唤醒请求：恢复主窗口并置于前台。</summary>

@@ -14,6 +14,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using musicPlayer.Data;
 using musicPlayer.Services;
@@ -133,6 +134,9 @@ namespace musicPlayer
             }
             timer.Stop();
             DisposeTrayIcon();
+
+            // 释放在线曲库隐藏内核（S2）
+            HiddenBrowserService.Instance.Dispose();
         }
 
         // =====================================================================
