@@ -21,6 +21,42 @@ namespace musicPlayer.Services
         private const string TestUrl = "https://example.com/";
 
         /// <summary>
+        /// 本地模拟挑战页（S3 测试用，不依赖外网）：
+        /// 带 #challenge-running 挑战元素 + "Just a moment..." 标题，
+        /// 点页面里的按钮（或注入脚本）移除元素即视为"验证通过"。
+        /// </summary>
+        public const string CaptchaDemoHtml = @"<!DOCTYPE html>
+<html><head><meta charset=""utf-8""><title>Just a moment...</title>
+<style>
+  body { font-family: 'Segoe UI', 'Microsoft YaHei UI'; background:#101018; color:#DDDDDD; padding:28px; }
+  h2 { color:#FFC107; font-size:17px; }
+  p { font-size:13px; line-height:1.9; color:#AAAAAA; }
+  button { font-size:13px; padding:9px 18px; cursor:pointer; border-radius:8px;
+           border:1px solid #33FFFFFF; background:#2EFFC107; color:#FFFFFF; }
+</style></head>
+<body>
+  <h2 id=""challenge-running"">正在验证您是否是真人…</h2>
+  <p>这是播放器自带的<strong>本地模拟验证页</strong>，用于测试「人机验证中转窗口」。</p>
+  <p>点下面的按钮即可模拟「验证通过」，窗口会在一秒内自动关闭。</p>
+  <p><button id=""btnPass"" onclick=""passNow()"">模拟完成验证</button></p>
+  <script>
+    function passNow() {
+      var el = document.getElementById('challenge-running');
+      if (el) el.remove();
+      document.title = '验证完成';
+    }
+  </script>
+</body></html>";
+
+        /// <summary>把模拟挑战页写到临时目录，返回 file:// 地址。</summary>
+        public static string PrepareCaptchaDemoPage()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "musicplayer_captcha_demo.html");
+            File.WriteAllText(path, CaptchaDemoHtml, System.Text.Encoding.UTF8);
+            return new Uri(path).AbsoluteUri;
+        }
+
+        /// <summary>
         /// 跑一遍内核基础自检，逐行回调日志。
         /// 返回 true 表示全部通过。**不会**主动释放内核——留着让调用方观察空闲回收。
         /// </summary>
@@ -88,6 +124,30 @@ namespace musicPlayer.Services
                 // Cookie
                 var cookies = await svc.GetCookiesAsync("https://example.com", ct);
                 Ok($"Cookie 读取 {cookies.Count} 条");
+
+                // ── 人机验证识别（S3）──
+                log("\n── 人机验证识别 ──");
+
+                if (CaptchaDetector.IsCaptchaUrl("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b"))
+                    Ok("URL 判据命中 Cloudflare 挑战页");
+                else Bad("URL 判据未命中 Cloudflare 挑战页");
+
+                if (!CaptchaDetector.IsCaptchaUrl("https://example.com/search?q=piano"))
+                    Ok("普通搜索 URL 不误判为挑战");
+                else Bad("普通 URL 被误判为挑战");
+
+                string demoUrl = PrepareCaptchaDemoPage();
+                await svc.NavigateAsync(demoUrl, ct);
+                if (await svc.DetectCaptchaAsync(ct)) Ok("本地模拟挑战页被识别为挑战");
+                else Bad("本地模拟挑战页未被识别");
+
+                if (await svc.IsCaptchaPassedAsync(demoUrl, ct)) Bad("挑战还在却判定为已通过");
+                else Ok("挑战存在时正确判定为未通过");
+
+                await svc.ExecuteScriptAsync(
+                    "var e=document.getElementById('challenge-running'); if(e) e.remove(); document.title='验证完成';", ct);
+                if (await svc.IsCaptchaPassedAsync(demoUrl, ct)) Ok("移除挑战元素后判定为已通过");
+                else Bad("移除挑战元素后仍判定为未通过");
 
                 log("\n── 内存 ──");
                 long ownMb = HiddenBrowserService.GetOwnWorkingSetMb();

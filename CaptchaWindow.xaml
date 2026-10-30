@@ -1,0 +1,109 @@
+<Window x:Class="musicPlayer.CaptchaWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="需要人工验证" Width="760" Height="640" MinWidth="560" MinHeight="480"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        WindowStyle="None" Background="#14141E"
+        FontFamily="Segoe UI, Microsoft YaHei UI"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        PreviewKeyDown="Window_PreviewKeyDown">
+
+    <!-- 说明：本窗口**不能**用 AllowsTransparency（分层窗口容不下原生子窗口），
+         圆角交给 DWM（Win11），Win10 保持直角——内核区域必须是实打实的矩形。 -->
+
+    <Window.Resources>
+        <Style x:Key="WinButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#E6FFFFFF"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="9"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Opacity" Value="0.85"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Opacity" Value="0.7"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="56"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="60"/>
+        </Grid.RowDefinitions>
+
+        <!-- ===== 顶栏（WPF，不重叠内核区域）===== -->
+        <Border Grid.Row="0" Background="#191925" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid Margin="16,0,10,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Width="32" Height="32" CornerRadius="10" Background="#26FFC107"
+                            VerticalAlignment="Center">
+                        <TextBlock Text="🛡" FontSize="14" HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+                        <TextBlock x:Name="txtTitle" Text="该站点需要人工验证" FontSize="13.5"
+                                   FontWeight="SemiBold" Foreground="#F2FFFFFF"/>
+                        <TextBlock x:Name="txtSubtitle" Text="请在弹出的网页里完成验证，通过后窗口会自动关闭"
+                                   FontSize="11" Foreground="#80CCCCCC" Margin="0,2,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <Button Content="✕" HorizontalAlignment="Right" VerticalAlignment="Center"
+                        Width="30" Height="28" FontSize="12" Cursor="Hand" Padding="0"
+                        Style="{StaticResource WinButton}" Background="#14FFFFFF"
+                        Click="btnClose_Click"/>
+            </Grid>
+        </Border>
+
+        <!-- ===== 内核区域：WebView2 会精确覆盖这块矩形，这里不放任何 WPF 内容 ===== -->
+        <Border Grid.Row="1" Background="#0B0B12">
+            <Grid x:Name="contentHost" Background="#0B0B12">
+                <!-- 内核初始化 / 导航期间的占位提示 -->
+                <TextBlock x:Name="txtPlaceholder" Text="正在加载验证页面…" FontSize="12.5"
+                           Foreground="#66CCCCCC" HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+
+        <!-- ===== 底栏 ===== -->
+        <Border Grid.Row="2" Background="#191925" BorderBrush="#1FFFFFFF" BorderThickness="0,1,0,0">
+            <Grid Margin="16,0,14,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Ellipse x:Name="dotState" Width="7" Height="7" Fill="#FFC107"
+                             VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtStatus" Text="等待验证结果…" FontSize="12"
+                               Foreground="#B0CCCCCC" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button Content="取消本次搜索" Style="{StaticResource WinButton}"
+                            Background="#14FFFFFF" BorderBrush="#26FFFFFF" BorderThickness="1"
+                            Click="btnCancel_Click"/>
+                    <Button x:Name="btnManualPass" Content="我已完成验证" Style="{StaticResource WinButton}"
+                            Background="#2EFFC107" Margin="10,0,0,0" Click="btnManualPass_Click"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

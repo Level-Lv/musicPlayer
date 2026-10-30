@@ -99,6 +99,9 @@ namespace musicPlayer
             // 用于验证 XAML/样式改动没有把窗口写崩（结果写 %TEMP%\musicplayer_diag.log）
             _ = OpenDiagnosticWindowIfRequestedAsync();
 
+            // 人机验证窗口测试入口（保留）：MP_ONLINE_CAPTCHA_TEST=1/2，见方法注释
+            _ = RunCaptchaWindowTestIfRequestedAsync();
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
@@ -1701,6 +1704,82 @@ namespace musicPlayer
             finally
             {
                 win?.Close();
+            }
+        }
+
+        /// <summary>
+        /// 人机验证中转窗口测试（保留的测试代码，S3 对应）：
+        /// - <c>MP_ONLINE_CAPTCHA_TEST=1</c>：打开验证窗口加载**本地模拟挑战页**，你手动点页面里的
+        ///   「模拟完成验证」按钮，窗口应自动关闭（完整走一遍"人点 → 程序检测 → 自动关窗"）；
+        /// - <c>MP_ONLINE_CAPTCHA_TEST=2</c>：全自动模式，3 秒后程序注入脚本移除挑战元素，
+        ///   用来回归"自动关窗"这条逻辑（无需人工操作）。
+        /// 结果写 <c>%TEMP%\musicplayer_captchatest.log</c>。
+        /// 注意：不要和 MP_ONLINE_SELFTEST 同时开，两者会抢同一个内核。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunCaptchaWindowTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_CAPTCHA_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(2500); // 等主窗口显示
+
+            var sb = new System.Text.StringBuilder();
+            void Log(string s) => sb.AppendLine(s);
+
+            CaptchaWindow? win = null;
+            try
+            {
+                string demoUrl = Services.OnlineSelfTest.PrepareCaptchaDemoPage();
+                Log($"[{DateTime.Now:HH:mm:ss}] 人机验证窗口测试（模式 {mode}）");
+                Log($"模拟挑战页 = {demoUrl}");
+
+                win = new CaptchaWindow(demoUrl) { Owner = this };
+                win.Show();
+                Log($"窗口已打开 visible={win.IsVisible}");
+
+                await System.Threading.Tasks.Task.Delay(2500); // 等导航完成
+
+                bool detected = await Services.HiddenBrowserService.Instance.DetectCaptchaAsync();
+                Log($"挑战识别 = {detected}");
+                Log($"此时判定已通过 = {await Services.HiddenBrowserService.Instance.IsCaptchaPassedAsync(demoUrl)}");
+
+                if (mode == "2")
+                {
+                    await Services.HiddenBrowserService.Instance.ExecuteScriptAsync(
+                        "var e=document.getElementById('challenge-running'); if(e) e.remove(); document.title='验证完成';");
+                    Log("已注入模拟通过脚本（自动模式）");
+                    ShowToast("自动模式：已模拟验证通过，窗口应在 1~2 秒内自动关闭");
+                }
+                else
+                {
+                    ShowToast("请在弹出的窗口里点「模拟完成验证」按钮");
+                }
+
+                var sw = Stopwatch.StartNew();
+                while (win.IsVisible && sw.ElapsedMilliseconds < 40000)
+                {
+                    await System.Threading.Tasks.Task.Delay(300);
+                }
+
+                Log($"窗口已关闭 = {!win.IsVisible}");
+                Log($"耗时 = {sw.ElapsedMilliseconds} ms");
+                Log($"结果 = {win.Result}");
+
+                ShowToast(win.Result == CaptchaResult.Passed
+                    ? "验证窗口测试通过：已自动关闭"
+                    : $"验证窗口结果是 {win.Result}", warning: win.Result != CaptchaResult.Passed);
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("验证窗口测试失败，详情见 %TEMP%\\musicplayer_captchatest.log", warning: true);
+            }
+            finally
+            {
+                try { win?.Close(); } catch { }
+
+                string path = Path.Combine(Path.GetTempPath(), "musicplayer_captchatest.log");
+                try { File.WriteAllText(path, sb.ToString()); } catch { }
             }
         }
 

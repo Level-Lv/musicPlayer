@@ -11,6 +11,10 @@ using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using musicPlayer.Data;
 
+// System.Drawing 提供 Rectangle（WebView2 的 Bounds 用它），但它也有 Point；
+// WPF 的坐标换算要用 System.Windows.Point，这里显式指定，避免 CS0104 歧义
+using Point = System.Windows.Point;
+
 namespace musicPlayer.Services
 {
     /// <summary>音频嗅探命中事件（《在线曲库 PRD》F5.1/F5.2，S8 播放与 S9 下载订阅）。</summary>
@@ -322,6 +326,57 @@ namespace musicPlayer.Services
             _isVisibleOnHost = false;
         }
 
+        /// <summary>
+        /// 把内核切挂到指定窗口的**某个内容区**并显示（验证窗口 S3 / 向导 S5）。
+        ///
+        /// 为什么要传 contentArea：WebView2 是原生子窗口，会盖住同区域的 WPF 元素（airspace），
+        /// 所以宿主窗口只能把"留给网页的矩形"交给内核，顶栏/底栏用 WPF 画在矩形之外。
+        /// </summary>
+        public void ShowIn(Window host, FrameworkElement contentArea)
+        {
+            if (!_initialized)
+                throw new InvalidOperationException("内核尚未初始化，请先在 UI 线程调用 InitAsync");
+
+            _controller!.ParentWindow = new WindowInteropHelper(host).Handle;
+            _controller.IsVisible = true;
+            _isVisibleOnHost = true;
+            FitBoundsTo(host, contentArea);
+        }
+
+        /// <summary>让内核精确填满宿主窗口里 contentArea 那块矩形（像素对齐，按 DPI 换算）。</summary>
+        public void FitBoundsTo(Window host, FrameworkElement contentArea)
+        {
+            if (!_initialized || contentArea == null) return;
+            _controller!.Bounds = ComputeBounds(host, contentArea);
+        }
+
+        /// <summary>把 WPF 元素矩形换算成父窗口客户区的物理像素矩形。</summary>
+        private static Rectangle ComputeBounds(Window host, FrameworkElement contentArea)
+        {
+            double dpiX = 1.0, dpiY = 1.0;
+            if (PresentationSource.FromVisual(host) is HwndSource src && src.CompositionTarget != null)
+            {
+                dpiX = src.CompositionTarget.TransformToDevice.M11;
+                dpiY = src.CompositionTarget.TransformToDevice.M22;
+            }
+
+            Point origin;
+            try
+            {
+                origin = contentArea.TransformToAncestor(host).Transform(new Point(0, 0));
+            }
+            catch
+            {
+                origin = new Point(0, 0); // 视觉树还没挂好时的兜底
+            }
+
+            int x = (int)Math.Round(origin.X * dpiX);
+            int y = (int)Math.Round(origin.Y * dpiY);
+            int w = Math.Max(1, (int)Math.Round(contentArea.ActualWidth * dpiX));
+            int h = Math.Max(1, (int)Math.Round(contentArea.ActualHeight * dpiY));
+            return new Rectangle(x, y, w, h);
+        }
+
         /// <summary>让内核填满宿主窗口客户区（宿主 SizeChanged 时也要调一次）。</summary>
         public void FitBoundsTo(Window host)
         {
@@ -335,6 +390,33 @@ namespace musicPlayer.Services
             int h = Math.Max(1, (int)(host.ActualHeight * dpiY));
             _controller!.Bounds = new Rectangle(0, 0, w, h);
         }
+
+        #endregion
+
+        #region 人机验证检测（S3 用）
+
+        /// <summary>当前页面是否卡在人机验证上（URL 特征或 DOM 挑战元素，任一命中）。</summary>
+        public Task<bool> DetectCaptchaAsync(CancellationToken ct = default) =>
+            RunAsync(async core =>
+            {
+                if (CaptchaDetector.IsCaptchaUrl(core.Source)) return true;
+                return await CaptchaDetector.IsChallengeVisibleAsync(core);
+            }, ct);
+
+        /// <summary>验证是否已经通过（授权 Cookie 出现，或已回到目标站且无挑战元素）。</summary>
+        public Task<bool> IsCaptchaPassedAsync(string targetUrl, CancellationToken ct = default) =>
+            RunAsync(core => CaptchaDetector.IsPassedAsync(core, targetUrl), ct);
+
+        /// <summary>诊断快照：当前 URL、URL 判据、DOM 挑战判据（排查"为什么判定通过/未通过"用）。</summary>
+        public Task<(string Url, bool UrlLooksCaptcha, bool ChallengeVisible)> GetCaptchaProbeAsync(
+            CancellationToken ct = default) =>
+            RunAsync(async core =>
+            {
+                string url = core.Source ?? "";
+                bool byUrl = CaptchaDetector.IsCaptchaUrl(url);
+                bool visible = await CaptchaDetector.IsChallengeVisibleAsync(core);
+                return (url, byUrl, visible);
+            }, ct);
 
         #endregion
 
