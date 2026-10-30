@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Threading;
@@ -58,6 +59,7 @@ namespace musicPlayer.Services
         private bool _isVisibleOnHost;               // 当前是否切挂到了可见窗口（S3/S5）
         private int _activeOps;                      // 进行中的任务数（>0 时不做空闲回收）
         private DispatcherTimer? _idleTimer;
+        private int _idleRemaining;                  // 距回收还剩多少秒（仅诊断显示用）
 
         /// <summary>内核任务串行闸门：同一时刻只跑一个"导航+抓取"流程。</summary>
         private readonly SemaphoreSlim _gate = new(1, 1);
@@ -140,38 +142,70 @@ namespace musicPlayer.Services
             StartIdleTimer();
         }
 
-        /// <summary>释放内核（退出程序或空闲回收时调用）。宿主窗口保留，下次免重建。</summary>
+        /// <summary>
+        /// 释放内核（退出程序或空闲回收时调用）。宿主窗口保留，下次免重建。
+        ///
+        /// ⚠ 关键：**必须把 _environment 一起置空**。
+        /// WebView2 的浏览器进程（msedgewebview2.exe）由 Environment 与 Controller 共同持有，
+        /// 只 Close() 掉 Controller 而留着 Environment，进程会一直活着（常驻约 100MB）。
+        /// environment 本身重建只要几十毫秒，用户数据目录还在，登录态不受影响。
+        /// </summary>
         public void Dispose()
         {
             _idleTimer?.Stop();
             _idleTimer = null;
 
-            _controller?.Close();
+            try { _controller?.Close(); }
+            catch (Exception ex) { Debug.WriteLine($"关闭内核失败: {ex.Message}"); }
             _controller = null;
+
+            // 释放环境对象引用 → 浏览器进程随之退出（这是空闲回收真正生效的关键一步）
+            _environment = null;
+
             _initialized = false;
             _isVisibleOnHost = false;
+
+            // 内核进程退出后把工作集还给系统：任务管理器里的内存立刻降下来。
+            // 只在回收路径调用（含退出程序），不会在正常使用时抖动。
+            ProcessStats.TrimWorkingSet();
         }
 
-        /// <summary>空闲回收：只回收 Controller，环境与用户数据目录保留。</summary>
+        /// <summary>空闲回收：Controller 与 Environment 一起释放，浏览器进程才会真正退出。</summary>
         private void RecycleCore()
         {
             if (!_initialized || _isVisibleOnHost || _activeOps > 0) return;
             Dispose();
         }
 
+        /// <summary>强制立即回收内核（诊断窗口的"立即释放内核"按钮用）。</summary>
+        public void ForceRecycle() => RecycleCore();
+
         private void StartIdleTimer()
         {
             if (_idleTimer != null) return;
 
-            // 空闲 60s 自动释放（settings.online_idle_recycle = 0 可关闭，S10 加设置界面）
-            // 每次内核操作都会重启计时（见 ResetIdleTimer），计时走满 = 期间没有任何操作
-            _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(IdleRecycleSeconds) };
-            _idleTimer.Tick += (_, _) =>
-            {
-                bool enabled = Db.GetSetting("online_idle_recycle", "1") == "1";
-                if (enabled) RecycleCore();
-            };
+            // 秒级倒计时（诊断窗口能直接看到"还有 N 秒回收"）；settings.online_idle_recycle = 0 可关闭
+            _idleRemaining = IdleRecycleSeconds;
+            _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _idleTimer.Tick += (_, _) => OnIdleTick();
             _idleTimer.Start();
+        }
+
+        private void OnIdleTick()
+        {
+            if (!_initialized) { _idleRemaining = IdleRecycleSeconds; return; }
+            if (_isVisibleOnHost || _activeOps > 0) { _idleRemaining = IdleRecycleSeconds; return; }
+
+            bool enabled = Db.GetSetting("online_idle_recycle", "1") == "1";
+            if (!enabled) { _idleRemaining = IdleRecycleSeconds; return; }
+
+            _idleRemaining--;
+            if (_idleRemaining <= 0)
+            {
+                Debug.WriteLine($"[在线内核] 空闲 {IdleRecycleSeconds}s，回收内核");
+                Dispose();
+                _idleRemaining = IdleRecycleSeconds;
+            }
         }
 
         #endregion
@@ -191,7 +225,8 @@ namespace musicPlayer.Services
             try
             {
                 ResetIdleTimer();
-                return await work(CoreWebView2);
+                var core = CoreWebView2 ?? throw new InvalidOperationException("内核未就绪");
+                return await work(core);
             }
             finally
             {
@@ -397,14 +432,36 @@ namespace musicPlayer.Services
 
         private void ResetIdleTimer()
         {
-            // DispatcherTimer 不能跨线程改 Interval，这里用"重启计时"的轻量做法：
-            // Stop+Start 由 UI 线程调用（RunAsync 本就约定 UI 线程）。
-            if (_idleTimer == null) return;
-            _idleTimer.Stop();
-            _idleTimer.Start();
+            // 有操作就把倒计时拨回满值（计时器本身不动，避免频繁 Stop/Start）
+            _idleRemaining = IdleRecycleSeconds;
         }
 
-        /// <summary>空闲回收间隔（秒）。空闲计时器本身 5s 一跳，到 60s 无活动才真正回收。</summary>
+        /// <summary>空闲回收间隔（秒）：连续这么多秒没有任何内核操作才释放。</summary>
         private const int IdleRecycleSeconds = 60;
+
+        #region 诊断信息（设置页"在线功能诊断"用）
+
+        /// <summary>进行中的内核任务数。</summary>
+        public int ActiveOperationCount => _activeOps;
+
+        /// <summary>距空闲自动回收还剩多少秒（未初始化时返回满值）。</summary>
+        public int IdleRemainingSeconds => _initialized ? _idleRemaining : IdleRecycleSeconds;
+
+        /// <summary>当前用户数据目录（Cookie/登录态所在）。</summary>
+        public static string UserDataFolder => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "musicPlayer", "webview2");
+
+        /// <summary>
+        /// 统计属于本程序的 msedgewebview2.exe 进程数与内存占用（MB）。
+        /// 系统里还有 Windows Widgets 等自己的内核，所以按**父子进程链**判断归属：只统计能追溯到本进程的那些。
+        /// </summary>
+        public static (int Count, long TotalMb) GetBrowserProcessStats()
+            => ProcessStats.CountDescendants("msedgewebview2");
+
+        /// <summary>当前进程内存占用（MB），任务管理器口径的近似值。</summary>
+        public static long GetOwnWorkingSetMb() => ProcessStats.CurrentWorkingSetMb;
+
+        #endregion
     }
 }

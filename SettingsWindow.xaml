@@ -883,6 +883,20 @@
 
                         <TextBox x:Name="txtDbPath" IsReadOnly="True"
                                  Style="{StaticResource PathBox}" Margin="0,12,0,0"/>
+
+                        <!-- 在线功能诊断：查看隐藏内核状态 / 跑基础自检 / 手动释放内核 -->
+                        <Grid Margin="0,12,0,0">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="在线功能" FontSize="12" Foreground="#8FCCCCCC"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock x:Name="txtOnlineState" Text="隐藏内核：未启用" FontSize="12"
+                                           Foreground="#66CCCCCC" Margin="10,0,0,0"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <Button Content="在线诊断" Style="{StaticResource GhostButton}"
+                                    HorizontalAlignment="Right" MinWidth="82" Padding="0,7"
+                                    Click="btnOnlineDiagnostic_Click"/>
+                        </Grid>
                     </StackPanel>
                 </Border>
             </StackPanel>

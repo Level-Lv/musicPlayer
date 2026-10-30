@@ -85,6 +85,35 @@ namespace musicPlayer
 
             // 数据库位置
             txtDbPath.Text = Db.DbPath;
+
+            RefreshOnlineState();
+        }
+
+        /// <summary>刷新"隐藏内核"状态摘要（诊断窗口关闭后也会调一次）。</summary>
+        private void RefreshOnlineState()
+        {
+            var svc = HiddenBrowserService.Instance;
+            var (count, mb) = HiddenBrowserService.GetBrowserProcessStats();
+
+            if (svc.IsInitialized)
+            {
+                txtOnlineState.Text = $"隐藏内核运行中 · {count} 个进程 / {mb} MB · {svc.IdleRemainingSeconds}s 后回收";
+                txtOnlineState.Foreground = System.Windows.Media.Brushes.Gold;
+            }
+            else
+            {
+                txtOnlineState.Text = count > 0
+                    ? $"内核释放中 · 残留 {count} 个进程 / {mb} MB"
+                    : "隐藏内核未启用（空闲时不占内存）";
+                txtOnlineState.Foreground = System.Windows.Media.Brushes.Gray;
+            }
+        }
+
+        /// <summary>打开在线功能诊断窗口（保留的测试入口）。</summary>
+        private void btnOnlineDiagnostic_Click(object sender, RoutedEventArgs e)
+        {
+            OnlineDiagnosticWindow.ShowDialog(this);
+            RefreshOnlineState();
         }
 
         private void UpdateDefaultVolumeLabel()

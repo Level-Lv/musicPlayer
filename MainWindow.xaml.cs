@@ -91,6 +91,14 @@ namespace musicPlayer
             // 在线曲库前置环境自检（WebView2 Runtime / ffmpeg），缺失仅提示不阻塞本地功能
             _ = CheckOnlineEnvironmentAsync();
 
+            // 无界面自检入口（保留）：设置环境变量 MP_ONLINE_SELFTEST=1 启动时，
+            // 自动跑一遍在线内核自检并把结果写入 %TEMP%\musicplayer_onlinetest.log
+            _ = RunOnlineSelfTestIfRequestedAsync();
+
+            // 诊断窗口冒烟入口（保留）：MP_ONLINE_DIAG=1 时自动打开诊断窗口并记录加载结果，
+            // 用于验证 XAML/样式改动没有把窗口写崩（结果写 %TEMP%\musicplayer_diag.log）
+            _ = OpenDiagnosticWindowIfRequestedAsync();
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
@@ -1599,6 +1607,100 @@ namespace musicPlayer
             if (!OnlineEnvironment.FfmpegAvailable)
             {
                 ShowToast("缺少 ffmpeg 组件，在线下载功能不可用", warning: true);
+            }
+        }
+
+        /// <summary>
+        /// 无界面自检入口（保留的测试代码）：
+        /// 启动前设置环境变量 <c>MP_ONLINE_SELFTEST=1</c>，程序启动 2 秒后自动跑一遍在线内核自检，
+        /// 结果写入 <c>%TEMP%\musicplayer_onlinetest.log</c>，方便命令行 / CI 式回归验证。
+        /// 结束后**不主动释放内核**，用于观察空闲回收是否生效。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunOnlineSelfTestIfRequestedAsync()
+        {
+            if (Environment.GetEnvironmentVariable("MP_ONLINE_SELFTEST") != "1") return;
+
+            await System.Threading.Tasks.Task.Delay(2000); // 等窗口与数据库就绪
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[{DateTime.Now:HH:mm:ss}] 在线内核自检（MP_ONLINE_SELFTEST=1）");
+            bool ok = false;
+            try
+            {
+                ok = await OnlineSelfTest.RunCoreSelfTestAsync(line => sb.AppendLine(line));
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("自检异常: " + ex);
+            }
+            sb.AppendLine($"[{DateTime.Now:HH:mm:ss}] 结束：{(ok ? "全部通过" : "存在失败项")}");
+
+            string path = Path.Combine(Path.GetTempPath(), "musicplayer_onlinetest.log");
+            void Flush()
+            {
+                try { File.WriteAllText(path, sb.ToString()); }
+                catch (Exception ex) { Debug.WriteLine("写自检日志失败: " + ex.Message); }
+            }
+            Flush();
+
+            // 空闲回收观察：每 10 秒记录一次内核状态，直到进程真正归零（或 90 秒超时）。
+            // 目的：验证"空闲 60 秒后 msedgewebview2 退出、内存归还"这一条真的成立。
+            for (int i = 0; i < 9; i++)
+            {
+                await System.Threading.Tasks.Task.Delay(10000);
+
+                var svc = Services.HiddenBrowserService.Instance;
+                var (procCount, procMb) = Services.HiddenBrowserService.GetBrowserProcessStats();
+                sb.AppendLine($"[+{(i + 1) * 10,2}s] 内核={(svc.IsInitialized ? "运行中" : "已释放")} " +
+                              $"进程={procCount} 内核内存={procMb}MB 主进程={Services.HiddenBrowserService.GetOwnWorkingSetMb()}MB " +
+                              $"倒计时={svc.IdleRemainingSeconds}s");
+                Flush();
+
+                if (!svc.IsInitialized && procCount == 0)
+                {
+                    sb.AppendLine("空闲回收验证通过：内核进程与内存已归零");
+                    Flush();
+                    break;
+                }
+            }
+
+            ShowToast(ok ? "在线自检完成：全部通过" : "在线自检完成：存在失败项", warning: !ok);
+        }
+
+        /// <summary>
+        /// 诊断窗口冒烟入口（保留的测试代码）：
+        /// 设置 <c>MP_ONLINE_DIAG=1</c> 启动，2 秒后自动打开诊断窗口，记录是否正常加载，
+        /// 5 秒后自动关闭。用于验证诊断窗口/样式改动没有写崩（结果写 %TEMP%\musicplayer_diag.log）。
+        /// </summary>
+        private async System.Threading.Tasks.Task OpenDiagnosticWindowIfRequestedAsync()
+        {
+            if (Environment.GetEnvironmentVariable("MP_ONLINE_DIAG") != "1") return;
+
+            await System.Threading.Tasks.Task.Delay(2000);
+            string path = Path.Combine(Path.GetTempPath(), "musicplayer_diag.log");
+            OnlineDiagnosticWindow? win = null;
+            try
+            {
+                win = new OnlineDiagnosticWindow { Owner = this };
+                win.Show();
+                await System.Threading.Tasks.Task.Delay(1200);
+
+                File.WriteAllText(path,
+                    $"diag_window_created=OK\n" +
+                    $"is_loaded={win.IsLoaded}\n" +
+                    $"is_visible={win.IsVisible}\n" +
+                    $"title={win.Title}\n" +
+                    $"width={win.ActualWidth:0} height={win.ActualHeight:0}\n");
+
+                await System.Threading.Tasks.Task.Delay(4000);
+            }
+            catch (Exception ex)
+            {
+                try { File.WriteAllText(path, "diag_window_created=FAIL\n" + ex); } catch { }
+            }
+            finally
+            {
+                win?.Close();
             }
         }
 
