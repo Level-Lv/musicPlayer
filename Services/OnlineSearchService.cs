@@ -441,17 +441,51 @@ namespace musicPlayer.Services
 
         /// <summary>
         /// 嗅探中途注入的"自动播放"脚本：把页面上的 &lt;audio&gt;/&lt;video&gt; 拉起来，
-        /// 再点一下常见播放按钮。跑在**静音的隐藏内核**里，不会出声。
+        /// 再点一下播放按钮。跑在**静音的隐藏内核**里，不会出声。
+        ///
+        /// 点按钮的三级策略（实测歌曲宝 gequbao.com 这类"页面无直链、点了才 AJAX 换地址"的站）：
+        /// ① 按可见文字找「播放/试听/Play」（覆盖 #btn-main-play 这种自定义按钮）；
+        /// ② 常见 class/id 选择器（老站点）；
+        /// ③ id/class 里含 play 的元素兜底（player-toggle 之类）。
+        /// 每次只点**一个**元素。
+        /// ⚠ 不能用 !paused 当"已在播"的判据：play() 一调用 paused 就同步变 false
+        /// （哪怕媒体还没开始加载），会把点击步骤整个跳过——必须用「有源 + 在播」联合判断。
+        /// 返回 JSON 供日志诊断踢到了什么。
         /// </summary>
         public const string AutoPlayKickScript =
             @"(function(){
-  window.__mpKick = (window.__mpKick || 0) + 1;
   try{
+  var out = {media:0, busy:false, clicked:''};
   var m = document.querySelectorAll('audio,video');
-  for (var i=0;i<m.length;i++){ try{ m[i].muted = true; m[i].play(); }catch(e){} }
-  var sels = ['.play','.play-btn','.btn-play','[data-action=play]','[aria-label=播放]','#play','.jp-play','.aplayer-play'];
-  for (var j=0;j<sels.length;j++){ var b=document.querySelector(sels[j]); if(b){ try{ b.click(); }catch(e2){} break; } }
-}catch(err){} return 'ok';})()";
+  for (var i=0;i<m.length;i++){
+    try{ m[i].muted = true; m[i].play(); out.media++;
+      if (!m[i].paused && m[i].readyState > 0 && m[i].currentSrc) out.busy = true;
+    }catch(e){}
+  }
+  if (!out.busy){
+    var targets = [];
+    var words = ['播放','试听','Play','play'];
+    var els = document.querySelectorAll('button, a, [role=button]');
+    for (var a=0;a<els.length;a++){
+      var t=(els[a].textContent||'').replace(/\s+/g,'');
+      if (t && t.length<=8 && words.indexOf(t)>=0) targets.push(els[a]);
+    }
+    var sels=['.play','.play-btn','.btn-play','[data-action=play]','[aria-label=播放]',
+              '[aria-label*=""播放"" i]','[title*=""播放"" i]','#play','.jp-play','.aplayer-play',
+              '[id*=""play"" i]','[class*=""play"" i]'];
+    for (var s=0;s<sels.length;s++){ try{ var e2=document.querySelector(sels[s]); if(e2) targets.push(e2); }catch(e3){} }
+
+    for (var k=0;k<targets.length;k++){
+      var b=targets[k];
+      if (!b || !b.getBoundingClientRect) continue;
+      var r=b.getBoundingClientRect();
+      if (r.width<2 || r.height<2) continue;   // 隐藏的备用按钮别点
+      try{ b.click(); out.clicked=(b.tagName+'#'+(b.id||b.className)).slice(0,48); }catch(e4){}
+      break;
+    }
+  }
+  return JSON.stringify(out);
+}catch(err){ return 'err:'+err; }})()";
 
         // ══════════════════════════════ 单次搜索流程 ══════════════════════════════
 

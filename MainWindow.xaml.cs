@@ -3022,7 +3022,9 @@ namespace musicPlayer
             }
             if (isResolvingOnlineAudio)
             {
-                ShowToast("正在解析上一条的播放地址，稍等");
+                // 双击的第二下会落在这里：同一条还在解析就安静等结果，别弹提示吓人
+                if (!ReferenceEquals(r, _resolvingResult))
+                    ShowToast("正在解析上一条的播放地址，稍等");
                 return;
             }
 
@@ -3039,6 +3041,7 @@ namespace musicPlayer
             SelectInQueue(track);
 
             isResolvingOnlineAudio = true;
+            _resolvingResult = r;
             onlinePlayCts?.Dispose();
             onlinePlayCts = new CancellationTokenSource();
             string statusBackup = txtOnlineStatus.Text;
@@ -3055,6 +3058,7 @@ namespace musicPlayer
             finally
             {
                 isResolvingOnlineAudio = false;
+                _resolvingResult = null;
                 // 状态行别卡在"正在解析…"：恢复成结果条数那类信息
                 if (txtOnlineStatus.Text.StartsWith("正在解析", StringComparison.Ordinal))
                     txtOnlineStatus.Text = statusBackup;
@@ -3162,6 +3166,9 @@ namespace musicPlayer
 
         /// <summary>正在解析播放地址（同一时刻只解析一条）。</summary>
         private bool isResolvingOnlineAudio;
+
+        /// <summary>正在解析的是哪条结果（双击同一条时安静等待，不弹提示）。</summary>
+        private OnlineResult? _resolvingResult;
         private CancellationTokenSource? onlinePlayCts;
 
         /// <summary>

@@ -627,7 +627,7 @@ namespace musicPlayer.Services
                     _controller.IsVisible = true;    // 解除后台节流（宿主在屏幕外，不可见）
 
                     if (!string.IsNullOrWhiteSpace(kickScript))
-                        KickAfterDelay(core, kickScript, ct);
+                        KickAfterDelay(core, kickScript, ct, tcs);
 
                     using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     timeoutCts.CancelAfter(timeout);
@@ -652,24 +652,46 @@ namespace musicPlayer.Services
             }, ct);
 
         /// <summary>
-        /// 延迟 1.2 秒后注入"自动播放"脚本（嗅探辅助，异常一律吞掉）。
+        /// 延迟后注入"自动播放"脚本（嗅探辅助，异常一律吞掉）。
         /// ⚠ 必须在 UI 线程调用 WebView2：`Task.Delay(...).ConfigureAwait(false)` 之后
         /// 直接 ExecuteScriptAsync 会抛"线程不对"，脚本静默失败——这个坑实测踩过一次。
+        ///
+        /// **踢两次**（1.2s / 4.2s）：模块化站点的事件绑定有早有晚，只踢一脚容易扑空；
+        /// 命中（tcs 完成）或取消后不再踢——对"点了就播"的站点，多踢会把播放切成暂停。
+        /// 每次把脚本返回值写进日志（脚本自带 JSON 诊断：踢到了哪个按钮）。
         /// </summary>
-        private static void KickAfterDelay(CoreWebView2 core, string script, CancellationToken ct)
+        private static void KickAfterDelay(CoreWebView2 core, string script, CancellationToken ct,
+            TaskCompletionSource<AudioSniffedEventArgs?> tcs)
         {
             var dispatcher = Application.Current?.Dispatcher;
             if (dispatcher == null) return;
 
-            _ = Task.Delay(1200, ct).ContinueWith(_ =>
+            _ = Task.Run(async () =>
             {
-                dispatcher.BeginInvoke(new Action(async () =>
+                try
                 {
-                    try { await core.ExecuteScriptAsync(script); }
-                    catch (Exception ex) { Debug.WriteLine($"[嗅探] 自动播放脚本失败（忽略）: {ex.Message}"); }
-                }));
-            }, CancellationToken.None, TaskContinuationOptions.NotOnCanceled,
-                TaskScheduler.Default);
+                    foreach (int delayMs in new[] { 1200, 3000 })
+                    {
+                        await Task.Delay(delayMs, ct);
+                        if (tcs.Task.IsCompleted) return;
+
+                        await dispatcher.BeginInvoke(new Action(async () =>
+                        {
+                            try
+                            {
+                                string raw = await core.ExecuteScriptAsync(script);
+                                App.LogCrash("[嗅探] kick → " + raw);
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine($"[嗅探] 自动播放脚本失败（忽略）: {ex.Message}");
+                            }
+                        }));
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { Debug.WriteLine($"[嗅探] kick 循环异常（忽略）: {ex.Message}"); }
+            });
         }
 
         /// <summary>
