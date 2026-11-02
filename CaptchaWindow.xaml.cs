@@ -142,8 +142,27 @@ namespace musicPlayer
             _pollTimer.Stop();
             _navCts?.Cancel();
 
-            // 必须在窗口销毁前把内核摘回隐藏宿主，否则 controller 的父句柄失效会崩
-            try { _svc.HideBack(); }
+            // 必须在窗口销毁前把内核摘回隐藏宿主，否则 controller 的父句柄失效会崩。
+            // 但若此刻仍有内核调用在飞行中（例如刚点「我已完成验证」、脚本还没返回就关窗），
+            // 直接改挂 ParentWindow 会让内核挂死 → 之后所有在线操作永远等不到结果、程序像卡死。
+            // 处理：先等它最多 2 秒；还不结束就整体释放内核（下次搜索自动重建）。
+            try
+            {
+                for (int i = 0; i < 20 && _svc.ActiveOperationCount > 0; i++)
+                {
+                    System.Threading.Thread.Sleep(100);
+                }
+
+                if (_svc.ActiveOperationCount > 0)
+                {
+                    Debug.WriteLine("[验证窗口] 关闭时仍有内核调用未结束，改用力释放内核");
+                    _svc.ForceDisposeCore();
+                }
+                else
+                {
+                    _svc.HideBack();
+                }
+            }
             catch (Exception ex) { Debug.WriteLine($"[验证窗口] 归还内核失败: {ex.Message}"); }
 
             base.OnClosing(e);
@@ -168,7 +187,19 @@ namespace musicPlayer
                 _remaining--;
                 UpdateStatus();
 
-                if (await IsPassedAsync())
+                // 看门狗：单轮检测最多等 4 秒。
+                // 若内核/串行闸门卡住（页面僵死、脚本调用不返回），不能让 _checking 永久为 true——
+                // 否则后续每秒的轮询全部变成空转，窗口就再也不会自动关闭了。
+                var check = IsPassedAsync();
+                var finished = await Task.WhenAny(check, Task.Delay(TimeSpan.FromSeconds(4)));
+                if (!ReferenceEquals(finished, check))
+                {
+                    Debug.WriteLine("[验证窗口] 本轮检测 4 秒未返回（内核疑似无响应），跳过本轮");
+                    if (!_closing) txtStatus.Text = "内核响应较慢，正在重试…";
+                    return;
+                }
+
+                if (await check)
                 {
                     Finish(CaptchaResult.Passed);
                     return;
@@ -253,7 +284,16 @@ namespace musicPlayer
             txtStatus.Text = "正在检查验证结果…";
             try
             {
-                if (await IsPassedAsync())
+                // 同样加看门狗：检测卡住时不能让按钮永久禁用
+                var check = IsPassedAsync();
+                var finished = await Task.WhenAny(check, Task.Delay(TimeSpan.FromSeconds(5)));
+                if (!ReferenceEquals(finished, check))
+                {
+                    txtStatus.Text = "检查超时（内核无响应），可关闭窗口后重新搜索";
+                    return;
+                }
+
+                if (await check)
                 {
                     Finish(CaptchaResult.Passed);
                     return;

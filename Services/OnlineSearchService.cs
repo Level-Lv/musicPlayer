@@ -223,6 +223,8 @@ namespace musicPlayer.Services
                 Report(progress, OnlineSearchPhase.Searching, site.Name,
                     "该站点需要人工验证，请在弹出的窗口里完成…");
                 bool passed = await ShowCaptchaWindowAsync(finalUrl);
+                Report(progress, OnlineSearchPhase.Searching, site.Name,
+                    passed ? "验证已通过，继续抓取…" : "验证未通过，本次搜索终止");
                 if (!passed)
                 {
                     return Fail(site, OnlineSearchStatus.NeedCaptcha, "验证未完成，本次搜索已取消");

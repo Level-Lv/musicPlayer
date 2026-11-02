@@ -23,6 +23,12 @@ namespace musicPlayer
             // 全局异常日志：任何未处理异常都落到 %TEMP%\musicplayer_crash.log，便于事后诊断
             //（TODO: S10 收尾时决定是否保留/移到正式日志目录）
             LogCrash("===== 启动 =====");
+
+            // 测试入口互斥：同一个 PowerShell 会话里环境变量会一直留着，
+            // 若同时开了多套测试，它们会抢同一个 WebView2 内核（互相顶掉页面、验证窗口卡住），
+            // 表现就是程序像"卡死"。这里按优先级只保留一个，其余清掉并记日志。
+            EnforceSingleTestEntry();
+
             DispatcherUnhandledException += (_, args) =>
             {
                 LogCrash("UI线程异常: " + args.Exception);
@@ -54,6 +60,11 @@ namespace musicPlayer
 
                 if (!tookOver)
                 {
+                    // 已有实例在跑 → 本次启动只负责唤醒它。
+                    // 记一笔日志：测试时若前一个实例没关干净，环境变量会对这个"新启动"完全无效，
+                    // 表现就是"命令跑了但什么都没发生、日志也不更新"，很容易误判成程序卡死。
+                    LogCrash("已有实例在运行，本次启动被忽略（环境变量不会生效）");
+
                     // 确实有另一个实例在运行 → 唤醒它，然后自己退出
                     try
                     {
@@ -86,6 +97,41 @@ namespace musicPlayer
             var main = new MainWindow();
             Current.MainWindow = main; // StartupUri 已移除，手动指定主窗口
             main.Show();
+        }
+
+        /// <summary>
+        /// 测试入口互斥（保留的测试代码，S4 加）：
+        /// 同一个 PowerShell 会话里 `$env:XXX` 会一直保留，用户连着测 S3/S4 时很容易两个都在，
+        /// 两套测试会抢同一个 WebView2 内核 → 页面互相顶掉、验证窗口卡住不关、主窗口被模态窗锁死。
+        /// 这里按优先级只保留一个测试入口，其余清掉并写入 crash 日志，便于事后确认。
+        /// </summary>
+        private static void EnforceSingleTestEntry()
+        {
+            // 优先级从高到低（同时开多个时，前面那个生效）
+            string[] entries =
+            {
+                "MP_ONLINE_SEARCH_TEST",   // S4 搜索引擎
+                "MP_ONLINE_CAPTCHA_TEST",  // S3 验证窗口
+                "MP_ONLINE_SELFTEST",      // S2 内核自检
+                "MP_ONLINE_DIAG"           // 诊断窗口
+            };
+
+            string? winner = null;
+            foreach (string name in entries)
+            {
+                string value = Environment.GetEnvironmentVariable(name) ?? "";
+                if (value.Length == 0) continue;
+
+                if (winner == null)
+                {
+                    winner = $"{name}={value}";
+                    continue;
+                }
+
+                // 已经在跑另一个测试入口 → 清掉这个，避免两套抢内核
+                Environment.SetEnvironmentVariable(name, null);
+                LogCrash($"测试入口互斥：保留 {winner}，已忽略 {name}={value}");
+            }
         }
 
         /// <summary>把异常文本追加到 %TEMP%\musicplayer_crash.log。</summary>

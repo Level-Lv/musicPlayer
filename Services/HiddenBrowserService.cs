@@ -184,6 +184,14 @@ namespace musicPlayer.Services
         /// <summary>强制立即回收内核（诊断窗口的"立即释放内核"按钮用）。</summary>
         public void ForceRecycle() => RecycleCore();
 
+        /// <summary>
+        /// 无视"可见中/有任务进行中"强制释放内核。
+        /// 用途：验证窗口关闭时若仍有内核调用在飞行中（脚本/导航没返回），
+        /// 此时改挂 ParentWindow 会让内核挂死（之后所有调用永远等不到结果）——
+        /// 直接整体释放最安全，下次搜索会自动重建（约 1 秒）。
+        /// </summary>
+        public void ForceDisposeCore() => Dispose();
+
         private void StartIdleTimer()
         {
             if (_idleTimer != null) return;

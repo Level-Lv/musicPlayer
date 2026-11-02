@@ -162,10 +162,14 @@ namespace musicPlayer.Services
                 if (autoCaptcha)
                 {
                     // 自动模式：验证窗口每秒轮询 extraVerify，这里注入"点掉挑战"的逻辑
+                    int hookCalls = 0;
+                    log("  已注入自动过验证钩子（窗口轮询时应每秒调用一次）");
                     OnlineSearchService.CaptchaVerifyHook = async () =>
                     {
-                        await svc.ExecuteScriptAsync(
-                            "if (typeof passNow === 'function') passNow();", ct);
+                        hookCalls++;
+                        string raw = await svc.ExecuteScriptAsync(
+                            "if (typeof passNow === 'function') { passNow(); 'ok'; } else { 'no-passNow'; }", ct);
+                        log($"    [钩子] 第 {hookCalls} 次调用 → {raw}");
                         await Task.CompletedTask;
                         return true;
                     };

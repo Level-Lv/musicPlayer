@@ -1802,14 +1802,31 @@ namespace musicPlayer
             await System.Threading.Tasks.Task.Delay(2500); // 等主窗口与数据库就绪
 
             var sb = new System.Text.StringBuilder();
-            void Log(string s) => sb.AppendLine(s);
-            Services.OnlineSearchSelfTest.ShowToastHint =
-                msg => ShowToast(msg, warning: false);
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_searchtest.log");
+
+            // 逐行立刻落盘：卡死/崩溃时也能看到走到哪一步（最后不再一次性覆盖写）
+            void Log(string s)
+            {
+                sb.AppendLine(s);
+                try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { }
+            }
+
+            Services.OnlineSearchSelfTest.ShowToastHint = msg => ShowToast(msg, warning: false);
 
             try
             {
+                try { File.WriteAllText(logPath, ""); } catch { }
                 Log($"[{DateTime.Now:HH:mm:ss}] 搜索引擎自检（MP_ONLINE_SEARCH_TEST={mode}）");
-                bool ok = await Services.OnlineSearchSelfTest.RunAsync(Log, autoCaptcha: mode == "1");
+
+                // 硬超时：自检再怎么样也不能永远挂着（挂住时用户会以为程序卡死）。
+                // 3 分钟足够跑完全部用例（正常约 25 秒），超时就记日志并结束等待。
+                var runTask = Services.OnlineSearchSelfTest.RunAsync(Log, autoCaptcha: mode == "1");
+                var first = await System.Threading.Tasks.Task.WhenAny(runTask,
+                    System.Threading.Tasks.Task.Delay(TimeSpan.FromMinutes(3)));
+                bool ok = first == runTask && await runTask;
+                if (first != runTask)
+                    Log($"[{DateTime.Now:HH:mm:ss}] ✗ 自检超时（3 分钟未结束），已中止等待");
+
                 Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {ok}");
                 ShowToast(ok ? "搜索引擎自检：全部通过" : "搜索引擎自检：存在失败项，详见日志",
                     warning: !ok);
@@ -1822,8 +1839,6 @@ namespace musicPlayer
             finally
             {
                 Services.OnlineSearchSelfTest.ShowToastHint = null;
-                string path = Path.Combine(Path.GetTempPath(), "musicplayer_searchtest.log");
-                try { File.WriteAllText(path, sb.ToString()); } catch { }
             }
         }
 
