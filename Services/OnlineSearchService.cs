@@ -166,6 +166,21 @@ namespace musicPlayer.Services
             return outcomes;
         }
 
+        /// <summary>
+        /// 在当前页面上按选择器抓一次（**不导航、不轮询**）。
+        /// 给 S5 添加向导做"点选后实时预览"用——预览走的就是搜索时的同一段抓取脚本，
+        /// 所以"预览看到什么，正式搜索就抓到什么"。
+        /// </summary>
+        public static async Task<(List<OnlineResult> Items, string? SelectorError)> ExtractOnceAsync(
+            SiteSelectors selectors, CancellationToken ct = default)
+        {
+            if (!selectors.IsUsable)
+                return (new List<OnlineResult>(), null);
+
+            var snapshot = await RunScrapeAsync(BuildExtractScript(selectors), ct);
+            return (snapshot.Items, snapshot.SelectorError);
+        }
+
         // ══════════════════════════════ 单次搜索流程 ══════════════════════════════
 
         /// <summary>导航 → 等待 → 抓取 → 分类 的一次完整执行。</summary>

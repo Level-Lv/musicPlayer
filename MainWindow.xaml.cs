@@ -109,6 +109,9 @@ namespace musicPlayer
             // 在线视图自检入口（S6，保留）：MP_ONLINE_UI_TEST=1/2，见方法注释
             _ = RunOnlineUiTestIfRequestedAsync();
 
+            // 添加站点向导自检入口（S5，保留）：MP_ONLINE_WIZARD_TEST=1/2，见方法注释
+            _ = RunAddSiteWizardTestIfRequestedAsync();
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
@@ -2000,6 +2003,72 @@ namespace musicPlayer
         }
 
         /// <summary>
+        /// 添加站点向导自检（保留的测试代码，S5 对应）：
+        /// - <c>MP_ONLINE_WIZARD_TEST=1</c>：全自动——模板反推 9 项 + 自动猜/点选脚本 11 项 +
+        ///   端到端（配置→搜索→入库→读回），结果写 <c>%TEMP%\musicplayer_wizardtest.log</c>，跑完自动退出；
+        /// - <c>MP_ONLINE_WIZARD_TEST=2</c>：打开向导并直接跳到第 2 步（页面 = 本地模拟结果页），
+        ///   让你亲手点选、看右侧预览、再走第 3 步测试与保存。
+        ///
+        /// 为什么 mode 2 跳过第 1 步：本地模拟页是 file:// 地址，而"粘贴网址反推模板"只接受
+        /// http/https（真实站点才有意义）。mode 1 里用构造的 http 地址覆盖了反推逻辑。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunAddSiteWizardTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_WIZARD_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(1500);   // 等主窗口就绪
+
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_wizardtest.log");
+            void Log(string s)
+            {
+                try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { }
+            }
+
+            try
+            {
+                try { File.WriteAllText(logPath, ""); } catch { }
+                Log($"[{DateTime.Now:HH:mm:ss}] 添加站点向导自检（MP_ONLINE_WIZARD_TEST={mode}）");
+
+                if (mode == "2")
+                {
+                    var (resultsUrl, _, _) = Services.OnlineSearchSelfTest.PrepareDemoPages();
+                    EnterOnlineView();
+                    Log($"模拟结果页 = {resultsUrl}");
+
+                    var saved = await AddSiteWizardWindow.ShowForTestAsync(
+                        this, resultsUrl + "?q={q}", "夜曲");
+                    if (saved != null)
+                    {
+                        RefreshOnlineSites(saved.Id);
+                        ShowToast($"测试：已保存站点「{saved.Name}」");
+                        Log($"保存站点 id={saved.Id} name={saved.Name} 模板={saved.SearchTemplate}");
+                        Log($"选择器 item={saved.Selectors.Item} title={saved.Selectors.Title}");
+                    }
+                    else
+                    {
+                        Log("向导被关闭，未保存");
+                    }
+                    Log($"[{DateTime.Now:HH:mm:ss}] 手动模式结束");
+                    return;
+                }
+
+                bool ok = await Services.AddSiteSelfTest.RunAsync(Log);
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {ok}");
+                ShowToast(ok ? "站点向导自检：全部通过" : "站点向导自检：存在失败项，详见日志",
+                    warning: !ok);
+
+                await System.Threading.Tasks.Task.Delay(1200);
+                Application.Current?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("站点向导自检异常，详见 %TEMP%\\musicplayer_wizardtest.log", warning: true);
+            }
+        }
+
+        /// <summary>
         /// 应用内轻提示：主区顶部居中淡入，停留约 2.4 秒后淡出。
         /// 替代系统 MessageBox 弹窗（信息/警告类）；需要用户做选择的确认框仍用弹窗。
         /// </summary>
@@ -2165,8 +2234,11 @@ namespace musicPlayer
 
         // ── 站点与范围下拉 ──────────────────────────────────────────────────────
 
-        /// <summary>重读站点表并刷新范围下拉；尽量保留用户当前选中的站点。</summary>
-        private void RefreshOnlineSites()
+        /// <summary>
+        /// 重读站点表并刷新范围下拉；尽量保留用户当前选中的站点。
+        /// </summary>
+        /// <param name="selectSiteId">新增/编辑完指定站点后传它的 id，让下拉直接切过去。</param>
+        private void RefreshOnlineSites(long? selectSiteId = null)
         {
             string? keepName = null;
             if (cmbOnlineScope.SelectedIndex > OnlineScopeAll
@@ -2196,6 +2268,11 @@ namespace musicPlayer
             {
                 int found = onlineSites.FindIndex(s => s.Name == keepName);
                 if (found >= 0) index = found + 1;
+            }
+            if (selectSiteId is > 0)
+            {
+                int found = onlineSites.FindIndex(s => s.Id == selectSiteId.Value);
+                if (found >= 0) index = found + 1;      // 刚添加/编辑的站点优先
             }
             cmbOnlineScope.SelectedIndex = index;
 
@@ -2297,6 +2374,13 @@ namespace musicPlayer
         private async System.Threading.Tasks.Task RunOnlineSearchAsync()
         {
             if (isOnlineSearching) return;              // 搜索中忽略重复触发，Esc 才是取消
+
+            // 向导打开时内核被它占着（页面在向导窗口里），此时搜索会把向导的页面顶掉
+            if (AddSiteWizardWindow.IsOpen)
+            {
+                ShowToast("先把站点向导关掉再搜索");
+                return;
+            }
 
             string keyword = txtOnlineSearch.Text.Trim();
             if (keyword.Length == 0)
@@ -2476,10 +2560,23 @@ namespace musicPlayer
             ShowToast($"下载「{r.Title}」将在 S9 接入");
         }
 
-        // ── 底部操作栏（S5 向导 / S7 面板尚未接入）──────────────────────────────
+        // ── 底部操作栏 ────────────────────────────────────────────────────────
 
-        private void btnAddSite_Click(object sender, RoutedEventArgs e)
-            => ShowToast("添加站点向导将在 S5 接入");
+        /// <summary>＋添加站点：打开三步向导（S5），保存后立刻刷新站点与搜索范围。</summary>
+        private async void btnAddSite_Click(object sender, RoutedEventArgs e)
+        {
+            // 向导要独占同一个隐藏内核（页面会被切到向导窗口里），
+            // 所以先把正在跑的搜索停掉，否则两边会互相顶掉页面。
+            if (isOnlineSearching) onlineSearchCts?.Cancel();
+
+            var saved = await AddSiteWizardWindow.ShowAsync(this);
+            if (saved == null) return;
+
+            RefreshOnlineSites(saved.Id);
+            ShowToast($"已添加站点「{saved.Name}」");
+            txtOnlineStatus.Text = "输入关键词，回车搜索";
+            txtOnlineSearch.Focus();
+        }
 
         private void btnManageSites_Click(object sender, RoutedEventArgs e)
             => ShowToast("站点管理面板将在 S7 接入");

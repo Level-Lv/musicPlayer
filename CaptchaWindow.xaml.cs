@@ -249,7 +249,7 @@ namespace musicPlayer
                 txtPlaceholder.Text = "";
 
                 // 布局刚完成时内容区的实际尺寸可能还差一两帧，补一次精确对齐
-                Dispatcher.BeginInvoke(new Action(SafeFitBounds), DispatcherPriority.Loaded);
+                _ = Dispatcher.BeginInvoke(new Action(SafeFitBounds), DispatcherPriority.Loaded);
                 await Task.Delay(120);
                 SafeFitBounds();
 
