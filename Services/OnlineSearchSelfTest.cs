@@ -40,6 +40,53 @@ namespace musicPlayer.Services
             return (results, empty, challenge);
         }
 
+        /// <summary>演示站点名（S6 界面自检用；同名站点会被复用而不是重复插入）。</summary>
+        public const string DemoSiteName = "演示站（本地）";
+
+        /// <summary>
+        /// 确保库里有指向本地模拟结果页的演示站点，返回站点 id。
+        ///
+        /// 用途：S5 向导还没做时，界面上没有任何站点可搜——S6 要有办法验证"搜索 → 结果列表"，
+        /// 就用这条本地站点（file:// 地址，不联网、不依赖任何真实站点）。
+        /// 同名已存在则刷新模板/选择器（临时文件路径每次可能不同）。
+        /// </summary>
+        public static long EnsureDemoSite(string name = DemoSiteName)
+        {
+            var (resultsUrl, _, _) = PrepareDemoPages();
+
+            var site = new OnlineSite
+            {
+                Name = name,
+                SearchTemplate = resultsUrl + "?q={q}",
+                Selectors = new SiteSelectors
+                {
+                    Item = ".song",
+                    Title = ".t",
+                    Artist = ".a",
+                    Duration = ".d",
+                    Cover = "img",
+                    Link = "a.dl"
+                },
+                Status = OnlineSiteStatus.Ok
+            };
+
+            var existing = Db.GetOnlineSites().FirstOrDefault(s => s.Name == name);
+            if (existing != null)
+            {
+                site.Id = existing.Id;
+                Db.UpdateOnlineSite(site);
+                return existing.Id;
+            }
+            return Db.AddOnlineSite(site);
+        }
+
+        /// <summary>删除演示站点（自检结束后清理，避免污染用户的站点列表）。</summary>
+        public static void RemoveDemoSite(string name = DemoSiteName)
+        {
+            foreach (var s in Db.GetOnlineSites().Where(s => s.Name == name))
+                Db.DeleteOnlineSite(s.Id);
+        }
+
         private static string WritePage(string fileName, string html)
         {
             string path = Path.Combine(Path.GetTempPath(), fileName);

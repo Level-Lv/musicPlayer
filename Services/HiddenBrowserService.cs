@@ -107,9 +107,13 @@ namespace musicPlayer.Services
             }
             _hostHwnd = _hostSource.Handle;
 
-            string userDataFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "musicPlayer", "webview2");
+            // 数据目录：默认 %APPDATA%\musicPlayer\webview2（登录态/Cookie 跨会话保留）；
+            // 测试可用 MP_WEBVIEW_USERDATA 指到临时目录，避免与残留实例争同一个 Chromium profile
+            // （同一 profile 被占用时，新实例的内核会创建失败，表现为"在线功能整个不可用"）。
+            string userDataFolder = Environment.GetEnvironmentVariable("MP_WEBVIEW_USERDATA") is { Length: > 0 } custom
+                ? custom
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                               "musicPlayer", "webview2");
             Directory.CreateDirectory(userDataFolder);
 
             _environment = await CoreWebView2Environment.CreateAsync(null, userDataFolder);

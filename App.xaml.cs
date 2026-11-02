@@ -18,6 +18,26 @@ namespace musicPlayer
         private Mutex? instanceMutex;
         private EventWaitHandle? activateEvent;
 
+        /// <summary>
+        /// 本次启动是否是"测试运行"（设置了任一 MP_ONLINE_* 自检入口）。
+        ///
+        /// 测试运行用**独立的单实例名 + 独立 WebView2 数据目录**。原因很实际：
+        /// 一旦出现内核挂死的僵尸实例（taskkill /F 都"拒绝访问"），它会一直占着单实例 Mutex 和
+        /// Chromium profile，让之后所有测试启动全部无效（环境变量不生效、日志不更新）。
+        /// 隔离后测试至少能跑；正常使用时的单实例行为完全不变。
+        /// </summary>
+        private static bool IsTestRun =>
+            Environment.GetEnvironmentVariable("MP_ONLINE_UI_TEST") is { Length: > 0 }
+            || Environment.GetEnvironmentVariable("MP_ONLINE_SEARCH_TEST") is { Length: > 0 }
+            || Environment.GetEnvironmentVariable("MP_ONLINE_CAPTCHA_TEST") is { Length: > 0 }
+            || Environment.GetEnvironmentVariable("MP_ONLINE_SELFTEST") is { Length: > 0 }
+            || Environment.GetEnvironmentVariable("MP_ONLINE_DIAG") is { Length: > 0 };
+
+        private static string EffectiveMutexName => IsTestRun ? MutexName + "_test" : MutexName;
+
+        private static string EffectiveActivateEventName =>
+            IsTestRun ? ActivateEventName + "_test" : ActivateEventName;
+
         protected override void OnStartup(StartupEventArgs e)
         {
             // 全局异常日志：任何未处理异常都落到 %TEMP%\musicplayer_crash.log，便于事后诊断
@@ -28,6 +48,13 @@ namespace musicPlayer
             // 若同时开了多套测试，它们会抢同一个 WebView2 内核（互相顶掉页面、验证窗口卡住），
             // 表现就是程序像"卡死"。这里按优先级只保留一个，其余清掉并记日志。
             EnforceSingleTestEntry();
+
+            // 测试运行使用独立的 WebView2 数据目录（原因见 IsTestRun 注释）
+            if (IsTestRun && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MP_WEBVIEW_USERDATA")))
+            {
+                Environment.SetEnvironmentVariable("MP_WEBVIEW_USERDATA",
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "musicplayer_webview_test"));
+            }
 
             DispatcherUnhandledException += (_, args) =>
             {
@@ -42,7 +69,7 @@ namespace musicPlayer
                 args.SetObserved();
             };
 
-            instanceMutex = new Mutex(initiallyOwned: true, MutexName, out bool createdNew);
+            instanceMutex = new Mutex(initiallyOwned: true, EffectiveMutexName, out bool createdNew);
 
             if (!createdNew)
             {
@@ -68,7 +95,7 @@ namespace musicPlayer
                     // 确实有另一个实例在运行 → 唤醒它，然后自己退出
                     try
                     {
-                        if (EventWaitHandle.TryOpenExisting(ActivateEventName, out var existing))
+                        if (EventWaitHandle.TryOpenExisting(EffectiveActivateEventName, out var existing))
                         {
                             existing.Set();
                             existing.Dispose();
@@ -84,7 +111,7 @@ namespace musicPlayer
             }
 
             // 我们是正式实例：创建“唤醒事件”，监听后续第二实例的请求
-            activateEvent = new EventWaitHandle(initialState: false, mode: EventResetMode.AutoReset, name: ActivateEventName);
+            activateEvent = new EventWaitHandle(initialState: false, mode: EventResetMode.AutoReset, name: EffectiveActivateEventName);
             var listener = new Thread(ListenForActivateRequests)
             {
                 IsBackground = true, // 不阻塞进程退出
@@ -110,6 +137,7 @@ namespace musicPlayer
             // 优先级从高到低（同时开多个时，前面那个生效）
             string[] entries =
             {
+                "MP_ONLINE_UI_TEST",       // S6 在线视图界面
                 "MP_ONLINE_SEARCH_TEST",   // S4 搜索引擎
                 "MP_ONLINE_CAPTCHA_TEST",  // S3 验证窗口
                 "MP_ONLINE_SELFTEST",      // S2 内核自检

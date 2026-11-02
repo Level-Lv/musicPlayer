@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -105,11 +106,17 @@ namespace musicPlayer
             // 搜索引擎自检入口（S4，保留）：MP_ONLINE_SEARCH_TEST=1/2，见方法注释
             _ = RunSearchSelfTestIfRequestedAsync();
 
+            // 在线视图自检入口（S6，保留）：MP_ONLINE_UI_TEST=1/2，见方法注释
+            _ = RunOnlineUiTestIfRequestedAsync();
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
             musicfilesListView.ItemsSource = VisibleTracks;
             PlaylistsList.ItemsSource = Playlists;
+
+            // 在线结果列表（S6）：数据源常驻，切视图只切可见性，搜索词与结果都保留
+            onlineResultsList.ItemsSource = OnlineResults;
 
             // 音量持久化用的延迟写库定时器（拖动滑块时避免每帧写一次数据库）
             volumePersistTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -366,6 +373,9 @@ namespace musicPlayer
         /// <summary>切换当前歌单视图（0 = 全部歌曲）。</summary>
         private void SelectPlaylist(long playlistId)
         {
+            // 点任何歌单/全部歌曲 = 回到本地列表视图（在线视图与本地列表互斥）
+            ExitOnlineView();
+
             currentPlaylistId = playlistId;
 
             // 两个互斥的高亮：固定方块 vs ListBox 选中项
@@ -1844,6 +1854,152 @@ namespace musicPlayer
         }
 
         /// <summary>
+        /// 在线视图自检（保留的测试代码，S6 对应）：
+        /// - <c>MP_ONLINE_UI_TEST=1</c>：全自动——建演示站点 → 进入在线视图 → 搜索 → 断言行结构与状态
+        ///   → 切回本地再切回在线（验证状态保留）→ 清理演示站点；结果写 <c>%TEMP%\musicplayer_uitest.log</c>；
+        /// - <c>MP_ONLINE_UI_TEST=2</c>：只铺场——建演示站点、进入在线视图、搜一次把结果填满，
+        ///   然后把界面留给你肉眼检查（可继续自己输入关键词/上下键/点下载按钮）。
+        ///
+        /// 演示站点指向本地模拟结果页（file://），不联网。S5 向导做好后，这个入口仍可用于界面回归。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunOnlineUiTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_UI_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(1500);   // 等主窗口就绪
+
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_uitest.log");
+            int pass = 0, fail = 0;
+            void Log(string s)
+            {
+                try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { }
+            }
+            void Ok(string s) { pass++; Log("  ✓ " + s); }
+            void Bad(string s) { fail++; Log("  ✗ " + s); }
+
+            try
+            {
+                try { File.WriteAllText(logPath, ""); } catch { }
+                Log($"[{DateTime.Now:HH:mm:ss}] 在线视图自检（MP_ONLINE_UI_TEST={mode}）");
+
+                long siteId = Services.OnlineSearchSelfTest.EnsureDemoSite();
+                Log($"演示站点 id = {siteId}（{Services.OnlineSearchSelfTest.DemoSiteName}）");
+
+                // ① 入口方块 → 在线视图
+                EnterOnlineView();
+                if (OnlinePanel.Visibility == Visibility.Visible
+                    && SongsPanel.Visibility == Visibility.Collapsed)
+                    Ok("点在线方块：在线视图显示、本地列表隐藏");
+                else
+                    Bad($"视图切换异常：Online={OnlinePanel.Visibility} Songs={SongsPanel.Visibility}");
+
+                if (cmbOnlineScope.Items.Count >= 2)
+                    Ok($"范围下拉项数 = {cmbOnlineScope.Items.Count}（全部站点 + {onlineSites.Count} 个站点）");
+                else
+                    Bad($"范围下拉项数异常 = {cmbOnlineScope.Items.Count}");
+
+                if (cmbOnlineScope.SelectedIndex == 1)
+                    Ok($"默认选中第一个已添加站点（{cmbOnlineScope.SelectedItem}）");
+                else
+                    Bad($"默认范围应为第一个站点，实际 index={cmbOnlineScope.SelectedIndex}");
+
+                if (onlineEmptySites.Visibility == Visibility.Collapsed)
+                    Ok("已有站点时不显示空态引导");
+                else
+                    Bad("有站点却显示空态引导");
+
+                // 入口方块位置：必须位于＋（新建歌单）下方、设置键上方（PRD F1.1）
+                double plusY = btnNewPlaylist.TransformToVisual(this).Transform(new Point(0, 0)).Y;
+                double onlineY = OnlineBox.TransformToVisual(this).Transform(new Point(0, 0)).Y;
+                double settingsY = btnSettings.TransformToVisual(this).Transform(new Point(0, 0)).Y;
+                if (plusY < onlineY && onlineY < settingsY)
+                    Ok($"在线方块位置正确：＋({plusY:F0}) < 在线({onlineY:F0}) < 设置({settingsY:F0})");
+                else
+                    Bad($"在线方块位置异常：＋={plusY:F0} 在线={onlineY:F0} 设置={settingsY:F0}");
+
+                // ② 搜索
+                txtOnlineSearch.Text = "夜曲";
+                var sw = Stopwatch.StartNew();
+                await RunOnlineSearchAsync();
+                long ms = sw.ElapsedMilliseconds;
+                Log($"搜索耗时 {ms} ms，结果 {OnlineResults.Count} 条，状态行 = {txtOnlineStatus.Text}");
+
+                if (OnlineResults.Count == 3) Ok($"搜索返回 3 条（{ms} ms）");
+                else Bad($"结果数应为 3，实际 {OnlineResults.Count}");
+
+                if (onlineResultsList.Items.Count == 3) Ok("列表渲染 3 行");
+                else Bad($"列表行数应为 3，实际 {onlineResultsList.Items.Count}");
+
+                var first = OnlineResults.FirstOrDefault();
+                if (first != null && !string.IsNullOrWhiteSpace(first.DownloadButtonText))
+                    Ok($"行内按钮：文案「{first.DownloadButtonText}」可点={first.IsDownloadEnabled}");
+                else
+                    Bad("行内下载按钮文案为空");
+
+                if (onlineResultsList.SelectedIndex == 0) Ok("搜索完成自动选中第一条");
+                else Bad($"应自动选中第一条，实际 {onlineResultsList.SelectedIndex}");
+
+                if (onlineNoResult.Visibility == Visibility.Collapsed)
+                    Ok("有结果时不显示「没有找到」");
+                else
+                    Bad("有结果却显示空结果文案");
+
+                // ③ 视图互切：状态保留
+                SelectPlaylist(0);
+                if (SongsPanel.Visibility == Visibility.Visible
+                    && OnlinePanel.Visibility == Visibility.Collapsed)
+                    Ok("点「全部歌曲」回到本地列表");
+                else
+                    Bad("点歌单未回到本地列表");
+
+                EnterOnlineView();
+                if (txtOnlineSearch.Text == "夜曲" && OnlineResults.Count == 3)
+                    Ok("互切后保留搜索词与结果");
+                else
+                    Bad($"互切丢状态：关键词「{txtOnlineSearch.Text}」结果 {OnlineResults.Count}");
+
+                if (mode == "1")
+                {
+                    // ④ 清理：不留演示站点在用户库里
+                    Services.OnlineSearchSelfTest.RemoveDemoSite();
+                    RefreshOnlineSites();
+                    Log("已清理演示站点");
+
+                    if (onlineSites.Count == 0 && onlineEmptySites.Visibility == Visibility.Visible)
+                        Ok("清理后回到「添加第一个站点」空态");
+                    else
+                        Bad($"清理后空态异常：站点 {onlineSites.Count} 个，空态 {onlineEmptySites.Visibility}");
+                }
+                else
+                {
+                    txtOnlineSearch.Focus();
+                    txtOnlineSearch.SelectAll();
+                    ShowToast("在线视图已就绪：可自己输入关键词回车搜索（演示站点指向本地模拟页）");
+                }
+
+                Log($"\n结果：{pass} 通过 / {fail} 失败");
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {fail == 0}");
+
+                if (mode == "1")
+                {
+                    ShowToast(fail == 0 ? "在线视图自检：全部通过" : "在线视图自检：存在失败项，详见日志",
+                        warning: fail != 0);
+
+                    // 全自动模式跑完自己退出：不留下一个占着单实例/内核的窗口等用户手动关，
+                    // 也避免下次启动被"已有实例在运行"挡掉（这个坑踩过好几次）
+                    await System.Threading.Tasks.Task.Delay(1200);
+                    Application.Current?.Shutdown();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("在线视图自检异常，详见 %TEMP%\\musicplayer_uitest.log", warning: true);
+            }
+        }
+
+        /// <summary>
         /// 应用内轻提示：主区顶部居中淡入，停留约 2.4 秒后淡出。
         /// 替代系统 MessageBox 弹窗（信息/警告类）；需要用户做选择的确认框仍用弹窗。
         /// </summary>
@@ -1934,6 +2090,402 @@ namespace musicPlayer
 
         #endregion
 
+        #region 在线视图（S6：入口方块 / 搜索工具条 / 结果列表 / 底部操作栏）
+
+        // ── 状态 ────────────────────────────────────────────────────────────────
+        // 结果只存在内存里（PRD 决策⑤：搜索结果不进缓存/不落库）
+        private readonly ObservableCollection<OnlineResult> OnlineResults = new();
+
+        /// <summary>已添加站点（每次进入在线视图时从库里重读，S5/S7 改完配置能立刻生效）。</summary>
+        private List<OnlineSite> onlineSites = new();
+
+        /// <summary>当前是否处于在线视图（与本地歌曲列表互斥）。</summary>
+        private bool isOnlineMode;
+
+        /// <summary>是否已经搜过一次（决定"没有找到"文案要不要显示，避免一进来就报空）。</summary>
+        private bool onlineSearched;
+
+        private bool isOnlineSearching;
+        private CancellationTokenSource? onlineSearchCts;
+
+        /// <summary>默认选中"第一个已添加站点"（PRD 决策③：默认单站搜索）。</summary>
+        private const int OnlineScopeAll = 0;
+
+        // ── 入口：左侧"在线"方块 ────────────────────────────────────────────────
+
+        private void OnlineBox_Click(object sender, MouseButtonEventArgs e) => EnterOnlineView();
+
+        /// <summary>进入在线视图：隐藏本地歌曲列表，显示在线面板，刷新站点与范围下拉。</summary>
+        private void EnterOnlineView()
+        {
+            if (isOnlineMode) return;
+            isOnlineMode = true;
+
+            SongsPanel.Visibility = Visibility.Collapsed;
+            OnlinePanel.Visibility = Visibility.Visible;
+
+            // 方块高亮 + 清掉歌单栏的选中态（两个视图互斥，避免"看着是高亮歌单其实在在线页"）
+            SetOnlineBoxActive(true);
+            AllTracksBox.BorderBrush = new SolidColorBrush(Color.FromRgb(0x88, 0xFF, 0xFF));
+            suppressPlaylistSelection = true;
+            PlaylistsList.SelectedIndex = -1;
+            suppressPlaylistSelection = false;
+
+            RefreshOnlineSites();
+
+            if (string.IsNullOrWhiteSpace(txtOnlineSearch.Text))
+                txtOnlineSearch.Focus();
+            else
+                txtOnlineSearch.SelectAll();
+        }
+
+        /// <summary>回到本地歌曲列表（点歌单 / 点"全部歌曲"时调用）。</summary>
+        private void ExitOnlineView()
+        {
+            if (!isOnlineMode) return;
+            isOnlineMode = false;
+
+            OnlinePanel.Visibility = Visibility.Collapsed;
+            SongsPanel.Visibility = Visibility.Visible;
+            SetOnlineBoxActive(false);
+
+            // 搜索还在跑就取消，避免用户已经回本地列表了后台还在抓
+            onlineSearchCts?.Cancel();
+        }
+
+        private void SetOnlineBoxActive(bool active)
+        {
+            OnlineBox.Background = active
+                ? new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xD7, 0x00))
+                : new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+            OnlineBox.BorderBrush = active
+                ? new SolidColorBrush(Color.FromRgb(0xFF, 0xD7, 0x00))
+                : new SolidColorBrush(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF));
+        }
+
+        // ── 站点与范围下拉 ──────────────────────────────────────────────────────
+
+        /// <summary>重读站点表并刷新范围下拉；尽量保留用户当前选中的站点。</summary>
+        private void RefreshOnlineSites()
+        {
+            string? keepName = null;
+            if (cmbOnlineScope.SelectedIndex > OnlineScopeAll
+                && cmbOnlineScope.SelectedIndex - 1 < onlineSites.Count)
+            {
+                keepName = onlineSites[cmbOnlineScope.SelectedIndex - 1].Name;
+            }
+
+            try
+            {
+                onlineSites = Db.GetOnlineSites();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[在线] 读取站点失败: {ex.Message}");
+                onlineSites = new List<OnlineSite>();
+            }
+
+            cmbOnlineScope.Items.Clear();
+            cmbOnlineScope.Items.Add("全部站点");
+            foreach (var s in onlineSites) cmbOnlineScope.Items.Add(s.Name);
+
+            int index = onlineSites.Count == 0
+                ? OnlineScopeAll
+                : 1;                                    // 默认第一个已添加站点
+            if (keepName != null)
+            {
+                int found = onlineSites.FindIndex(s => s.Name == keepName);
+                if (found >= 0) index = found + 1;
+            }
+            cmbOnlineScope.SelectedIndex = index;
+
+            btnManageSites.Content = onlineSites.Count > 0
+                ? $"已添加站点 {onlineSites.Count}"
+                : "已添加站点";
+
+            UpdateOnlineEmptyState();
+
+            if (onlineSites.Count == 0)
+                txtOnlineStatus.Text = "先添加一个站点，才能搜索在线曲库";
+            else if (OnlineResults.Count == 0 && !isOnlineSearching)
+                txtOnlineStatus.Text = "输入关键词，回车搜索";
+        }
+
+        private void cmbOnlineScope_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // 只切换搜索范围，不发请求（回车/按钮才触发搜索），避免误触频繁打站点
+            if (isOnlineMode && !isOnlineSearching && OnlineResults.Count == 0
+                && onlineSites.Count > 0)
+            {
+                txtOnlineStatus.Text = "输入关键词，回车搜索";
+            }
+        }
+
+        /// <summary>本次搜索要用的站点：全部站点 or 下拉里选中的单站。</summary>
+        private List<OnlineSite> SelectedOnlineSites()
+        {
+            int index = cmbOnlineScope.SelectedIndex;
+            if (index <= OnlineScopeAll) return new List<OnlineSite>(onlineSites);
+            int i = index - 1;
+            return i >= 0 && i < onlineSites.Count
+                ? new List<OnlineSite> { onlineSites[i] }
+                : new List<OnlineSite>();
+        }
+
+        private void UpdateOnlineEmptyState()
+        {
+            bool noSites = onlineSites.Count == 0;
+            onlineEmptySites.Visibility = noSites && !isOnlineSearching
+                ? Visibility.Visible : Visibility.Collapsed;
+
+            bool showNoResult = !noSites && !isOnlineSearching && onlineSearched
+                                && OnlineResults.Count == 0;
+            onlineNoResult.Visibility = showNoResult ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void StartOnlineBusy()
+        {
+            isOnlineSearching = true;
+            onlineBusy.Visibility = Visibility.Visible;
+            onlineEmptySites.Visibility = Visibility.Collapsed;
+            onlineNoResult.Visibility = Visibility.Collapsed;
+
+            // 旋转动画：0→360 循环（停的时候由 StopOnlineBusy 移除动画）
+            var spin = new DoubleAnimation(0, 360, TimeSpan.FromSeconds(0.9))
+            {
+                RepeatBehavior = RepeatBehavior.Forever
+            };
+            onlineSpin.BeginAnimation(RotateTransform.AngleProperty, spin);
+        }
+
+        private void StopOnlineBusy()
+        {
+            isOnlineSearching = false;
+            onlineBusy.Visibility = Visibility.Collapsed;
+            onlineSpin.BeginAnimation(RotateTransform.AngleProperty, null);
+            UpdateOnlineEmptyState();
+        }
+
+        // ── 搜索 ────────────────────────────────────────────────────────────────
+
+        private void txtOnlineSearch_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter)
+            {
+                _ = RunOnlineSearchAsync();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Escape)
+            {
+                if (isOnlineSearching) CancelOnlineSearch();
+                else txtOnlineSearch.Clear();
+                e.Handled = true;
+            }
+        }
+
+        private void CancelOnlineSearch()
+        {
+            onlineSearchCts?.Cancel();
+            txtOnlineStatus.Text = "正在取消…";
+        }
+
+        /// <summary>
+        /// 执行一次在线搜索（结果只进内存）。
+        /// "全部站点"按站点**串行**跑（同一个隐藏内核只有一个标签页，并发会互相顶掉页面），
+        /// 结果按站点分组展示。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunOnlineSearchAsync()
+        {
+            if (isOnlineSearching) return;              // 搜索中忽略重复触发，Esc 才是取消
+
+            string keyword = txtOnlineSearch.Text.Trim();
+            if (keyword.Length == 0)
+            {
+                ShowToast("请输入要搜索的关键词");
+                txtOnlineSearch.Focus();
+                return;
+            }
+
+            var sites = SelectedOnlineSites();
+            if (sites.Count == 0)
+            {
+                ShowToast("还没有添加站点，先添加一个吧", warning: true);
+                UpdateOnlineEmptyState();
+                return;
+            }
+
+            onlineSearched = true;
+            OnlineResults.Clear();
+            ApplyOnlineGrouping(sites.Count > 1);
+            StartOnlineBusy();
+            txtOnlineStatus.Text = "正在搜索…";
+
+            // 每次搜索独立取消令牌；旧的一次性令牌先释放
+            onlineSearchCts?.Dispose();
+            onlineSearchCts = new CancellationTokenSource();
+            var ct = onlineSearchCts.Token;
+
+            var progress = new Progress<OnlineSearchProgress>(p =>
+            {
+                if (isOnlineSearching) txtOnlineStatus.Text = $"{p.SiteName}：{p.Message}";
+            });
+
+            var problems = new List<string>();    // 各站点的异常，最后合并成一条 Toast
+            int okSites = 0;
+
+            try
+            {
+                foreach (var site in sites)
+                {
+                    if (ct.IsCancellationRequested) break;
+
+                    var outcome = await OnlineSearchService.SearchAsync(site, keyword, progress, ct);
+                    switch (outcome.Status)
+                    {
+                        case OnlineSearchStatus.Ok:
+                            okSites++;
+                            foreach (var r in outcome.Results) OnlineResults.Add(r);
+                            break;
+
+                        case OnlineSearchStatus.EmptyResult:
+                            break;   // 该站确实没结果，不算错误
+
+                        case OnlineSearchStatus.Cancelled:
+                            break;
+
+                        case OnlineSearchStatus.NeedCaptcha:
+                            problems.Add($"{site.Name}：未完成人机验证");
+                            break;
+
+                        case OnlineSearchStatus.NeedLogin:
+                            problems.Add($"{site.Name}：需要登录");
+                            break;
+
+                        case OnlineSearchStatus.Broken:
+                            problems.Add($"{site.Name}：站点配置可能已失效");
+                            break;
+
+                        case OnlineSearchStatus.Timeout:
+                            problems.Add($"{site.Name}：加载超时");
+                            break;
+
+                        case OnlineSearchStatus.NavFailed:
+                            problems.Add($"{site.Name}：打不开页面");
+                            break;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                txtOnlineStatus.Text = "已取消";
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[在线] 搜索异常: {ex}");
+                problems.Add("搜索出错：" + ex.Message);
+            }
+            finally
+            {
+                StopOnlineBusy();
+            }
+
+            if (ct.IsCancellationRequested)
+            {
+                txtOnlineStatus.Text = OnlineResults.Count > 0
+                    ? $"已取消，保留 {OnlineResults.Count} 条结果"
+                    : "已取消";
+                return;
+            }
+
+            // 结果与状态行
+            if (OnlineResults.Count > 0)
+            {
+                txtOnlineStatus.Text = sites.Count > 1
+                    ? $"共 {OnlineResults.Count} 条（{okSites}/{sites.Count} 个站点有结果）"
+                    : $"共 {OnlineResults.Count} 条结果";
+                onlineResultsList.SelectedIndex = 0;
+            }
+            else
+            {
+                txtOnlineStatus.Text = problems.Count > 0 ? "搜索失败" : "没有找到相关内容";
+            }
+
+            UpdateOnlineEmptyState();
+
+            if (problems.Count > 0)
+            {
+                // 一次只弹一条，避免 N 个站点失败时 Toast 刷屏
+                string msg = problems.Count == 1
+                    ? problems[0]
+                    : $"{problems[0]} 等 {problems.Count} 个站点有问题";
+                ShowToast(msg, warning: true);
+            }
+        }
+
+        /// <summary>结果分组：全部站点模式按 SiteName 分组，单站模式不分组。</summary>
+        private void ApplyOnlineGrouping(bool groupBySite)
+        {
+            var view = (System.Windows.Data.ListCollectionView)
+                System.Windows.Data.CollectionViewSource.GetDefaultView(OnlineResults);
+            view.GroupDescriptions.Clear();
+            if (groupBySite)
+                view.GroupDescriptions.Add(new System.Windows.Data.PropertyGroupDescription("SiteName"));
+        }
+
+        // ── 列表交互 ────────────────────────────────────────────────────────────
+
+        /// <summary>在线列表的上下移动（↑↓ 共用）。</summary>
+        private void NavigateOnlineSelection(int delta)
+        {
+            int count = onlineResultsList.Items.Count;
+            if (count == 0) return;
+
+            int index = onlineResultsList.SelectedIndex + delta;
+            if (index < 0) index = 0;
+            if (index >= count) index = count - 1;
+
+            onlineResultsList.SelectedIndex = index;
+            onlineResultsList.ScrollIntoView(onlineResultsList.SelectedItem);
+        }
+
+        /// <summary>试听入口（S8 接入播放；现在给出明确提示，不做假动作）。</summary>
+        private void PlayOnlineSelected()
+        {
+            if (onlineResultsList.SelectedItem is not OnlineResult r)
+            {
+                ShowToast("先选一条结果");
+                return;
+            }
+            ShowToast($"试听「{r.Title}」将在 S8 接入");
+        }
+
+        private void onlineResultsList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+            => PlayOnlineSelected();
+
+        /// <summary>行内下载按钮（S9 接入下载队列；三态样式已就位）。</summary>
+        private void btnOnlineDownload_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.Tag is not OnlineResult r) return;
+
+            if (!r.CanDownload)
+            {
+                ShowToast(string.IsNullOrWhiteSpace(r.NotDownloadReason)
+                    ? "这条结果不支持下载" : r.NotDownloadReason, warning: true);
+                return;
+            }
+            ShowToast($"下载「{r.Title}」将在 S9 接入");
+        }
+
+        // ── 底部操作栏（S5 向导 / S7 面板尚未接入）──────────────────────────────
+
+        private void btnAddSite_Click(object sender, RoutedEventArgs e)
+            => ShowToast("添加站点向导将在 S5 接入");
+
+        private void btnManageSites_Click(object sender, RoutedEventArgs e)
+            => ShowToast("站点管理面板将在 S7 接入");
+
+        #endregion
+
         #region 全局快捷键（PRD 5.6）
 
         private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -1942,6 +2494,50 @@ namespace musicPlayer
 
             // 歌单名内联编辑框聚焦：所有按键交给编辑框自己（回车/Esc 由其 KeyDown 处理）
             if (Keyboard.FocusedElement == txtPlaylistEditor) return;
+
+            // ── 在线视图（S6）：↑↓ 选结果、回车试听、Esc 取消/清空、Ctrl+F 聚焦在线搜索框 ──
+            // 其余按键（空格播放/暂停、Ctrl+A/D 切歌、M 静音…）继续走下面的全局分支
+            if (isOnlineMode)
+            {
+                if (Keyboard.FocusedElement == txtOnlineSearch)
+                    return;   // 输入框内的回车/Esc 由 txtOnlineSearch_KeyDown 处理
+
+                switch (e.Key)
+                {
+                    case Key.Up:
+                        NavigateOnlineSelection(-1);
+                        e.Handled = true;
+                        return;
+
+                    case Key.Down:
+                        NavigateOnlineSelection(1);
+                        e.Handled = true;
+                        return;
+
+                    case Key.Enter:
+                        PlayOnlineSelected();
+                        e.Handled = true;
+                        return;
+
+                    case Key.Escape:
+                        if (isOnlineSearching) CancelOnlineSearch();
+                        else txtOnlineSearch.Clear();
+                        e.Handled = true;
+                        return;
+
+                    case Key.F when isCtrlDown:
+                        txtOnlineSearch.Focus();
+                        txtOnlineSearch.SelectAll();
+                        e.Handled = true;
+                        return;
+
+                    case Key.Delete:
+                        // 在线结果不是本地曲库条目，Delete 不应该去动歌单
+                        e.Handled = true;
+                        return;
+                }
+            }
+
 
             // 搜索框聚焦时：Esc 清除搜索、↑↓ 移动选中项、回车执行搜索（搜完焦点移到歌曲列表）
             if (Keyboard.FocusedElement == txtSearch)
