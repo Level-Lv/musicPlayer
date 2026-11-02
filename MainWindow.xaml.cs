@@ -112,6 +112,12 @@ namespace musicPlayer
             // 添加站点向导自检入口（S5，保留）：MP_ONLINE_WIZARD_TEST=1/2，见方法注释
             _ = RunAddSiteWizardTestIfRequestedAsync();
 
+            // 站点面板自检入口（S7，保留）：MP_ONLINE_MANAGER_TEST=1/2，见方法注释
+            _ = RunSiteManagerTestIfRequestedAsync();
+
+            // 站点状态自愈（S7）：搜索把站点标成 need_login/broken 时，就地提示 + 同步内存状态
+            OnlineSearchService.SiteStatusChanged += OnOnlineSiteStatusChanged;
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
@@ -2069,6 +2075,56 @@ namespace musicPlayer
         }
 
         /// <summary>
+        /// S7 站点面板自检入口（保留）：MP_ONLINE_MANAGER_TEST=1 全自动 / =2 打开面板手动看。
+        /// 日志写 %TEMP%\musicplayer_managertest.log（逐行落盘，卡住也能定位）。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunSiteManagerTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_MANAGER_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(1500);   // 等主窗口与数据库就绪
+
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_managertest.log");
+            void Log(string s)
+            {
+                try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { }
+            }
+
+            try
+            {
+                try { File.WriteAllText(logPath, ""); } catch { }
+                Log($"[{DateTime.Now:HH:mm:ss}] 站点面板自检（MP_ONLINE_MANAGER_TEST={mode}）");
+
+                if (mode == "2")
+                {
+                    EnterOnlineView();
+                    Services.SiteManagerSelfTest.RemoveDemoSites();
+                    var ids = Services.SiteManagerSelfTest.SeedDemoSites();
+                    Log($"已造演示站点 {ids.Count} 个：正常站 / 坏选择器 / 需登录站");
+                    RefreshOnlineSites(ids.FirstOrDefault());
+
+                    ShowToast("测试：已造 3 个演示站点，试试测试/重配/登录/删除");
+                    _ = SiteManagerWindow.ShowAsync(this, "夜曲");   // 非模态，留给用户玩
+                    return;
+                }
+
+                bool ok = await Services.SiteManagerSelfTest.RunAsync(Log);
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {ok}");
+                ShowToast(ok ? "站点面板自检：全部通过" : "站点面板自检：存在失败项，详见日志",
+                    warning: !ok);
+
+                await System.Threading.Tasks.Task.Delay(1200);
+                Application.Current?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("站点面板自检异常，详见 %TEMP%\\musicplayer_managertest.log", warning: true);
+            }
+        }
+
+        /// <summary>
         /// 应用内轻提示：主区顶部居中淡入，停留约 2.4 秒后淡出。
         /// 替代系统 MessageBox 弹窗（信息/警告类）；需要用户做选择的确认框仍用弹窗。
         /// </summary>
@@ -2375,10 +2431,10 @@ namespace musicPlayer
         {
             if (isOnlineSearching) return;              // 搜索中忽略重复触发，Esc 才是取消
 
-            // 向导打开时内核被它占着（页面在向导窗口里），此时搜索会把向导的页面顶掉
-            if (AddSiteWizardWindow.IsOpen)
+            // 向导/站点面板打开时内核被它们占着（页面在那些窗口里），此时搜索会把页面顶掉
+            if (AddSiteWizardWindow.IsOpen || SiteManagerWindow.IsOpen)
             {
-                ShowToast("先把站点向导关掉再搜索");
+                ShowToast("先把站点窗口关掉再搜索");
                 return;
             }
 
@@ -2578,8 +2634,59 @@ namespace musicPlayer
             txtOnlineSearch.Focus();
         }
 
-        private void btnManageSites_Click(object sender, RoutedEventArgs e)
-            => ShowToast("站点管理面板将在 S7 接入");
+        /// <summary>
+        /// 打开"已添加站点"面板（S7）：测试 / 重配 / 登录 / 删除都在面板里完成。
+        /// 面板自己会与库同步，关闭后这里统一刷新下拉与空态。
+        /// </summary>
+        private async void btnManageSites_Click(object sender, RoutedEventArgs e)
+        {
+            // 面板里的"测试/登录"要用同一个隐藏内核，先把正在跑的搜索停掉
+            if (isOnlineSearching) onlineSearchCts?.Cancel();
+
+            var result = await SiteManagerWindow.ShowAsync(this, txtOnlineSearch.Text);
+
+            // 删过站点：当前结果里可能有"已删站点"的条目，清掉避免误导
+            if (result.SitesDeleted)
+            {
+                OnlineResults.Clear();
+                onlineSearched = false;
+                txtOnlineStatus.Text = "站点已变更，请重新搜索";
+            }
+
+            RefreshOnlineSites(result.FocusSiteId);
+
+            if (result.Changed && !result.SitesDeleted)
+                txtOnlineStatus.Text = "站点配置已更新";
+        }
+
+        /// <summary>
+        /// 搜索结果自动改了站点状态（S7 自愈）：
+        /// 只同步内存状态并在"不是搜索中"时提示用户去修，搜索中的提示由搜索结果统一给出。
+        /// </summary>
+        private void OnOnlineSiteStatusChanged(long siteId, string status)
+        {
+            void Apply()
+            {
+                var site = onlineSites.FirstOrDefault(s => s.Id == siteId);
+                if (site != null) site.Status = status;
+
+                // 搜索进行中：RunOnlineSearchAsync 结束时会统一 Toast，这里不重复打扰
+                if (isOnlineSearching) return;
+
+                string name = site?.Name ?? "该站点";
+                if (status == OnlineSiteStatus.Broken)
+                {
+                    ShowToast($"{name}：站点配置已失效，到「已添加站点」里重新点选", warning: true);
+                }
+                else if (status == OnlineSiteStatus.NeedLogin)
+                {
+                    ShowToast($"{name}：需要登录，可在「已添加站点」里完成一次登录", warning: true);
+                }
+            }
+
+            if (Dispatcher.CheckAccess()) Apply();
+            else Dispatcher.BeginInvoke(new Action(Apply));
+        }
 
         #endregion
 

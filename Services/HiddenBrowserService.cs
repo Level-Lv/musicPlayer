@@ -138,6 +138,16 @@ namespace musicPlayer.Services
             // 拦截弹窗：任何 window.open/新标签一律取消（PRD F4.x"杜绝弹窗"）
             core.NewWindowRequested += (_, e) =>
             {
+                // 登录窗口期间允许"弹窗转同页"：不少站点用 window.open 走第三方登录（微信/QQ/邮箱），
+                // 一刀切拦掉会让这些站点永远登不上。这里不新开窗口，而是把当前内核导航过去
+                // （脚本上下文可能丢失，但登录跳转本身就靠重定向完成，够用）。
+                if (AllowNewWindows && !string.IsNullOrWhiteSpace(e.Uri))
+                {
+                    e.Handled = true;
+                    core.Navigate(e.Uri);
+                    return;
+                }
+
                 e.Handled = true;
                 BlockedNewWindowCount++;
             };
@@ -310,11 +320,43 @@ namespace musicPlayer.Services
                 return list;
             }, ct);
 
+        /// <summary>是否把站点弹窗转成当前页导航（仅登录窗口期间为 true，其余时间一律拦截）。</summary>
+        public bool AllowNewWindows { get; set; }
+
         /// <summary>停止当前一切加载（搜索取消按钮调用）。</summary>
         public void StopLoading()
         {
             if (_initialized) CoreWebView2?.Stop();
         }
+
+        /// <summary>
+        /// 清掉某个网址作用域内的全部 Cookie，返回删除条数（S7 删除站点时调用）。
+        ///
+        /// WebView2 的 Cookie 是按 UserDataFolder 共享的，没有"按站点删除"的现成 API，
+        /// 只能用 <c>GetCookies(uri)</c> 取出该 uri 适用的 Cookie（含 Domain 通配）再逐个删。
+        /// 注意：这里只清该站点的登录态，其他站点不受影响。
+        /// </summary>
+        public Task<int> ClearCookiesForAsync(string url, CancellationToken ct = default) =>
+            RunAsync(async core =>
+            {
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return 0;
+
+                var cookies = await core.CookieManager.GetCookiesAsync(uri.AbsoluteUri);
+                int deleted = 0;
+                foreach (var cookie in cookies)
+                {
+                    try
+                    {
+                        core.CookieManager.DeleteCookie(cookie);
+                        deleted++;
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[内核] 删除 Cookie 失败({cookie.Name}): {ex.Message}");
+                    }
+                }
+                return deleted;
+            }, ct);
 
         #endregion
 

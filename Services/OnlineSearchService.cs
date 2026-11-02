@@ -92,6 +92,13 @@ namespace musicPlayer.Services
         /// </summary>
         public static Func<Task<bool>>? CaptchaVerifyHook { get; set; }
 
+        /// <summary>
+        /// 站点状态被搜索结果自动改写时触发（S7 自愈联动）：
+        /// 参数为 站点 id 与新状态（ok / need_login / broken）。
+        /// 主界面据此提示用户"站点配置失效，去站点面板重新点选"。
+        /// </summary>
+        public static event Action<long, string>? SiteStatusChanged;
+
         // ══════════════════════════════ 对外入口 ══════════════════════════════
 
         /// <summary>
@@ -109,11 +116,18 @@ namespace musicPlayer.Services
         {
             Report(progress, OnlineSearchPhase.Searching, site.Name, "正在打开搜索页…");
 
+            // 结局统一出口：顺手把站点状态回写到库（S7 自愈），再返回给调用方
+            OnlineSearchOutcome Finish(OnlineSearchOutcome outcome)
+            {
+                PersistSearchStatus(site, outcome.Status);
+                return outcome;
+            }
+
             // ① 模板填充（{q} URL 编码，{p} 页码）
             string url = BuildSearchUrl(site, keyword, page);
             if (url.Length == 0)
             {
-                return Fail(site, OnlineSearchStatus.Broken, "搜索模板没有 {q} 占位符");
+                return Finish(Fail(site, OnlineSearchStatus.Broken, "搜索模板没有 {q} 占位符"));
             }
 
             try
@@ -121,7 +135,7 @@ namespace musicPlayer.Services
             // 站点配置完整性前置校验（缺结果项/标题选择器 = 无法搜索，直接判失效）
             if (!site.Selectors.IsUsable)
             {
-                return Fail(site, OnlineSearchStatus.Broken, "站点配置不完整：缺少结果项或标题选择器");
+                return Finish(Fail(site, OnlineSearchStatus.Broken, "站点配置不完整：缺少结果项或标题选择器"));
             }
 
             // ② 导航 + ③ 等待 + ④ 抓取 + ⑤ 分类
@@ -132,17 +146,19 @@ namespace musicPlayer.Services
                     outcome.Status == OnlineSearchStatus.Ok
                         ? OnlineSearchPhase.Completed : OnlineSearchPhase.Failed,
                     site.Name, Describe(outcome));
-                return outcome;
+                return Finish(outcome);
             }
             catch (OperationCanceledException)
             {
+                // 用户取消不改站点状态：这不是站点的问题
                 Svc.StopLoading();
                 Report(progress, OnlineSearchPhase.Failed, site.Name, "已取消");
                 return Fail(site, OnlineSearchStatus.Cancelled, "已取消");
             }
             catch (Exception ex)
             {
-                // 兜底：任何意外异常都归为 NavFailed（带原始信息），不让一次站点故障炸掉整个搜索
+                // 兜底：任何意外异常都归为 NavFailed（带原始信息），不让一次站点故障炸掉整个搜索。
+                // 同样不回写状态——程序侧异常不能判站点"失效"。
                 Report(progress, OnlineSearchPhase.Failed, site.Name, ex.Message);
                 return Fail(site, OnlineSearchStatus.NavFailed, $"搜索出错：{ex.Message}");
             }
@@ -164,6 +180,46 @@ namespace musicPlayer.Services
                 outcomes.Add(await SearchAsync(site, keyword, progress, ct, page));
             }
             return outcomes;
+        }
+
+        /// <summary>
+        /// 把搜索结局回写成站点状态（《在线曲库 PRD》F2.4 自愈联动）：
+        /// Ok → ok + 最近成功时间；NeedLogin → need_login；Broken → broken。
+        /// 其余结局（超时/打不开/取消）不改状态——那是网络或临时问题，不该让站点"背锅"。
+        /// 只对已入库站点（Id > 0）生效，自检里的临时站点不落库。
+        /// </summary>
+        private static void PersistSearchStatus(OnlineSite site, OnlineSearchStatus status)
+        {
+            if (site.Id <= 0) return;
+
+            string? target = status switch
+            {
+                OnlineSearchStatus.Ok => OnlineSiteStatus.Ok,
+                OnlineSearchStatus.NeedLogin => OnlineSiteStatus.NeedLogin,
+                OnlineSearchStatus.Broken => OnlineSiteStatus.Broken,
+                _ => null
+            };
+            if (target == null) return;
+
+            bool changed = !string.Equals(site.Status, target, StringComparison.Ordinal);
+            site.Status = target;                       // 内存里的对象同步，界面立刻能反映
+
+            try
+            {
+                if (status == OnlineSearchStatus.Ok) Db.MarkOnlineSiteOk(site.Id);
+                else Db.SetOnlineSiteStatus(site.Id, target);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[搜索] 状态回写失败({site.Name}): {ex.Message}");
+                return;
+            }
+
+            // 只在状态真正变化时通知（成功也通知：站点从"失效"恢复成"正常"要刷新徽章）
+            if (!changed) return;
+            App.LogCrash($"[搜索] 站点状态回写：{site.Name} → {target}");
+            try { SiteStatusChanged?.Invoke(site.Id, target); }
+            catch (Exception ex) { Debug.WriteLine($"[搜索] 状态事件处理异常: {ex.Message}"); }
         }
 
         /// <summary>

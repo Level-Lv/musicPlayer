@@ -114,8 +114,12 @@ namespace musicPlayer
         /// <summary>
         /// 打开向导并异步等待结果（非模态）。返回用户保存的站点；取消返回 null。
         /// </summary>
-        public static Task<OnlineSite?> ShowAsync(Window? owner, OnlineSite? editSite = null) =>
-            ShowCoreAsync(owner, editSite, null, null);
+        /// <param name="suggestedKeyword">
+        /// 建议关键词（S7 站点面板会带当前搜索词）：编辑模式下预填，省得用户再想一个词。
+        /// </param>
+        public static Task<OnlineSite?> ShowAsync(Window? owner, OnlineSite? editSite = null,
+            string? suggestedKeyword = null) =>
+            ShowCoreAsync(owner, editSite, null, null, suggestedKeyword);
 
         /// <summary>
         /// **测试专用**：带模板直接打开并跳到第 2 步。
@@ -126,9 +130,10 @@ namespace musicPlayer
             ShowCoreAsync(owner, null, template, keyword);
 
         private static Task<OnlineSite?> ShowCoreAsync(Window? owner, OnlineSite? editSite,
-            string? prefillTemplate, string? prefillKeyword)
+            string? prefillTemplate, string? prefillKeyword, string? suggestedKeyword = null)
         {
             var win = new AddSiteWizardWindow(editSite, prefillTemplate, prefillKeyword);
+            if (!string.IsNullOrWhiteSpace(suggestedKeyword)) win.txtKeyword.Text = suggestedKeyword.Trim();
             var tcs = new TaskCompletionSource<OnlineSite?>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 

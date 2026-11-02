@@ -25,9 +25,10 @@ namespace musicPlayer.Data
 
         /// <summary>
         /// 当前数据库结构版本，结构变更时递增并补充迁移逻辑。
-        /// v1：本地曲库（tracks/playlists/...）；v2：在线曲库（online_sites/downloads + tracks.source）。
+        /// v1：本地曲库（tracks/playlists/...）；v2：在线曲库（online_sites/downloads + tracks.source）；
+        /// v3：online_sites 增加 last_ok_at（站点面板显示"最近成功"）。
         /// </summary>
-        private const int SchemaVersion = 2;
+        private const int SchemaVersion = 3;
 
         /// <summary>旧版 setting.json 文件名。</summary>
         private const string LegacySettingsFileName = "setting.json";
@@ -59,6 +60,7 @@ namespace musicPlayer.Data
 
                 CreateTables(conn);
                 MigrateTracksColumns(conn); // v1 → v2：tracks 扩列（在线来源标记）
+                MigrateOnlineSiteColumns(conn); // v2 → v3：online_sites 扩列（最近成功时间）
                 ExecuteNonQuery(conn,
                     $"INSERT OR IGNORE INTO schema_version (version) VALUES ({SchemaVersion});");
 
@@ -146,6 +148,7 @@ namespace musicPlayer.Data
                     selectors         TEXT NOT NULL DEFAULT '{}',
                     status            TEXT NOT NULL DEFAULT 'ok',
                     cookie_updated_at INTEGER NOT NULL DEFAULT 0,
+                    last_ok_at        INTEGER NOT NULL DEFAULT 0,
                     created_at        INTEGER NOT NULL DEFAULT 0
                 );");
 
@@ -188,6 +191,27 @@ namespace musicPlayer.Data
             if (!columns.Contains("source_url"))
             {
                 ExecuteNonQuery(conn, "ALTER TABLE tracks ADD COLUMN source_url TEXT;");
+            }
+        }
+
+        /// <summary>
+        /// v2 → v3 迁移：给 online_sites 补 last_ok_at（最近一次搜索成功的时间）。
+        /// 同样幂等：旧库没有这列就补，重复启动不会报错。
+        /// </summary>
+        private static void MigrateOnlineSiteColumns(SqliteConnection conn)
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA table_info(online_sites);";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) columns.Add(reader.GetString(1));
+            }
+
+            if (!columns.Contains("last_ok_at"))
+            {
+                ExecuteNonQuery(conn,
+                    "ALTER TABLE online_sites ADD COLUMN last_ok_at INTEGER NOT NULL DEFAULT 0;");
             }
         }
 
@@ -712,7 +736,7 @@ namespace musicPlayer.Data
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
                 SELECT id, name, search_template, page_template, selectors,
-                       status, cookie_updated_at, created_at
+                       status, cookie_updated_at, last_ok_at, created_at
                 FROM online_sites ORDER BY id;";
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) list.Add(ReadOnlineSite(reader));
@@ -726,7 +750,7 @@ namespace musicPlayer.Data
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
                 SELECT id, name, search_template, page_template, selectors,
-                       status, cookie_updated_at, created_at
+                       status, cookie_updated_at, last_ok_at, created_at
                 FROM online_sites WHERE id = @id;";
             cmd.Parameters.AddWithValue("@id", id);
             using var reader = cmd.ExecuteReader();
@@ -795,6 +819,25 @@ namespace musicPlayer.Data
                 p => { p.AddWithValue("@now", Now()); p.AddWithValue("@id", siteId); });
         }
 
+        /// <summary>
+        /// 搜索成功的回写：状态置 ok + 记录最近成功时间。
+        /// 站点面板的"最近成功"与状态徽章都读这两个字段（S7 自愈）。
+        /// </summary>
+        public static void MarkOnlineSiteOk(long siteId)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn, @"
+                UPDATE online_sites
+                   SET status = @status, last_ok_at = @now
+                 WHERE id = @id;",
+                p =>
+                {
+                    p.AddWithValue("@status", OnlineSiteStatus.Ok);
+                    p.AddWithValue("@now", Now());
+                    p.AddWithValue("@id", siteId);
+                });
+        }
+
         /// <summary>删除站点（配置随之消失；已下载的音乐文件与 tracks 记录保留）。</summary>
         public static void DeleteOnlineSite(long siteId)
         {
@@ -812,7 +855,8 @@ namespace musicPlayer.Data
             Selectors = DeserializeSelectors(reader.IsDBNull(4) ? null : reader.GetString(4)),
             Status = reader.GetString(5),
             CookieUpdatedAt = reader.GetInt64(6),
-            CreatedAt = reader.GetInt64(7)
+            LastOkAt = reader.GetInt64(7),
+            CreatedAt = reader.GetInt64(8)
         };
 
         /// <summary>选择器 JSON 序列化（紧凑格式，便于直接入库排查）。</summary>

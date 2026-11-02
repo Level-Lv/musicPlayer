@@ -28,6 +28,7 @@ namespace musicPlayer
         /// </summary>
         private static bool IsTestRun =>
             Environment.GetEnvironmentVariable("MP_ONLINE_UI_TEST") is { Length: > 0 }
+            || Environment.GetEnvironmentVariable("MP_ONLINE_MANAGER_TEST") is { Length: > 0 }
             || Environment.GetEnvironmentVariable("MP_ONLINE_WIZARD_TEST") is { Length: > 0 }
             || Environment.GetEnvironmentVariable("MP_ONLINE_SEARCH_TEST") is { Length: > 0 }
             || Environment.GetEnvironmentVariable("MP_ONLINE_CAPTCHA_TEST") is { Length: > 0 }
@@ -139,6 +140,7 @@ namespace musicPlayer
             string[] entries =
             {
                 "MP_ONLINE_UI_TEST",       // S6 在线视图界面
+                "MP_ONLINE_MANAGER_TEST",  // S7 站点面板
                 "MP_ONLINE_WIZARD_TEST",   // S5 添加站点向导
                 "MP_ONLINE_SEARCH_TEST",   // S4 搜索引擎
                 "MP_ONLINE_CAPTCHA_TEST",  // S3 验证窗口

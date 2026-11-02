@@ -261,6 +261,9 @@ namespace musicPlayer.Data
         /// <summary>Cookie 最近更新时间（unix ms，0 表示从未保存）。</summary>
         public long CookieUpdatedAt { get; set; }
 
+        /// <summary>最近一次搜索成功的时间（unix ms，0 表示从未成功）。</summary>
+        public long LastOkAt { get; set; }
+
         /// <summary>创建时间（unix ms）。</summary>
         public long CreatedAt { get; set; }
 
@@ -269,6 +272,58 @@ namespace musicPlayer.Data
         protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+    /// <summary>
+    /// 站点在界面上的展示辅助（站点面板 S7 用，自检也直接断言这些方法）。
+    /// 都是纯函数：不碰数据库、不碰 UI，便于长期回归。
+    /// </summary>
+    public static class OnlineSiteInfo
+    {
+        /// <summary>取模板里的主机名（解析失败就返回原文，界面上不至于空白）。</summary>
+        public static string HostOf(string? template)
+        {
+            if (string.IsNullOrWhiteSpace(template)) return "";
+            if (!Uri.TryCreate(template, UriKind.Absolute, out var uri)) return template.Trim();
+            return uri.Host.Length > 0 ? uri.Host : uri.Scheme;
+        }
+
+        /// <summary>
+        /// 推导 favicon 地址：<c>scheme://host/favicon.ico</c>。
+        /// 不联网探测、不额外存库——加载失败时界面退回首字母徽章。
+        /// file:// 之类的本地页没有 favicon，返回 null。
+        /// </summary>
+        public static string? FaviconUrlOf(string? template)
+        {
+            if (string.IsNullOrWhiteSpace(template)) return null;
+            if (!Uri.TryCreate(template, UriKind.Absolute, out var uri)) return null;
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return null;
+            if (uri.Host.Length == 0) return null;
+            return $"{uri.Scheme}://{uri.Host}/favicon.ico";
+        }
+
+        /// <summary>首字母徽章（favicon 加载失败时的退路）。</summary>
+        public static string InitialOf(string? name)
+        {
+            string s = (name ?? "").Trim();
+            return s.Length == 0 ? "?" : s.Substring(0, 1).ToUpperInvariant();
+        }
+
+        /// <summary>"最近成功"的人话：从未成功 / 今天 15:32 / 昨天 15:32 / 3 天前 / 10月1日。</summary>
+        public static string DescribeLastOk(long unixMs, DateTime? now = null)
+        {
+            if (unixMs <= 0) return "从未成功";
+
+            DateTime t = DateTimeOffset.FromUnixTimeMilliseconds(unixMs).LocalDateTime;
+            DateTime today = (now ?? DateTime.Now).Date;
+            int days = (today - t.Date).Days;
+
+            if (days <= 0) return "今天 " + t.ToString("HH:mm");
+            if (days == 1) return "昨天 " + t.ToString("HH:mm");
+            if (days < 7) return $"{days} 天前";
+            if (t.Year == today.Year) return t.ToString("M月d日");
+            return t.ToString("yyyy-MM-dd");
         }
     }
 
