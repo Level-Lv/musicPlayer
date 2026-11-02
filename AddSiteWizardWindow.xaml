@@ -343,6 +343,10 @@
                                         Tag="link" Click="btnPickField_Click"/>
                             </Grid>
 
+                            <TextBlock FontSize="10.5" Foreground="#5FFFFFFF" Margin="0,4,0,0"
+                                       TextWrapping="Wrap" LineHeight="15"
+                                       Text="结果项＝一条结果的整行（网页上重复出现的那个容器）；详情链接＝行内跳到歌曲页的那个 &lt;a&gt;。整行本身就是一条链接时，只点结果项，详情链接留空即可。"/>
+
                             <Border Height="1" Background="#1FFFFFFF" Margin="0,12,0,12"/>
 
                             <Grid>

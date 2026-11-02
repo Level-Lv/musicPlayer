@@ -203,7 +203,11 @@ namespace musicPlayer.Data
         /// <summary>结果项容器选择器（列表里的一条）。</summary>
         public string? Item { get; set; }
 
-        /// <summary>标题（容器内相对选择器）。</summary>
+        /// <summary>
+        /// 标题（容器内相对选择器）。
+        /// **留空 = 用整行的文字当标题**——有些站点的搜索结果就是一条链接文本
+        /// （<c>&lt;li&gt;&lt;a href="/song/1"&gt;歌名&lt;/a&gt;&lt;/li&gt;</c>），此时行内没有更细的标题元素可点。
+        /// </summary>
         public string? Title { get; set; }
 
         /// <summary>艺人（可选）。</summary>
@@ -218,9 +222,12 @@ namespace musicPlayer.Data
         /// <summary>详情页链接（可选，用于后续嗅探音频）。</summary>
         public string? Link { get; set; }
 
-        /// <summary>是否具备最小可用配置（结果项 + 标题）。</summary>
-        public bool IsUsable =>
-            !string.IsNullOrWhiteSpace(Item) && !string.IsNullOrWhiteSpace(Title);
+        /// <summary>
+        /// 是否具备最小可用配置。
+        /// 只有「结果项」是硬要求：标题可留空（用整行文字），详情链接也可留空
+        /// （抓取时会自动取行自身 / 行内第一个 &lt;a href&gt;）。
+        /// </summary>
+        public bool IsUsable => !string.IsNullOrWhiteSpace(Item);
     }
 
     /// <summary>

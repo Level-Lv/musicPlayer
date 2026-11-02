@@ -744,8 +744,13 @@ namespace musicPlayer.Services
 
         /// <summary>
         /// 生成抓取脚本：把选择器配置拼进一段 JS，逐项收集
-        /// 标题（必填）/ 艺人 / 时长 / 封面 / 详情链接（可选），相对链接转绝对。
+        /// 标题 / 艺人 / 时长 / 封面 / 详情链接，相对链接转绝对。
         /// 选择器以 JSON 字符串字面量注入，天然防注入。
+        ///
+        /// **两个降级规则**（对应"结果项本身就是一个链接文本"的站点）：
+        /// - 标题选择器留空 → 标题 = 整行的文字；
+        /// - 详情链接选择器留空 → 行本身是 &lt;a&gt; 就用它自己的 href，否则用行内第一个 &lt;a href&gt;。
+        /// 配置了选择器时仍严格按配置走（配错就是 0 条，不会被兜底掩盖）。
         /// </summary>
         private static string BuildExtractScript(SiteSelectors sel)
         {
@@ -764,27 +769,37 @@ namespace musicPlayer.Services
   try {{
     var items = document.querySelectorAll(conf.item);
     var out = [];
+    var abs = function(href) {{
+      if (!href) return '';
+      try {{ return new URL(href, location.href).href; }} catch (e2) {{ return href; }}
+    }};
+    var textOf = function(e) {{
+      return e ? (e.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    }};
     for (var i = 0; i < items.length && i < 100; i++) {{
       var it = items[i];
       var txt = function(sel) {{
         if (!sel) return '';
-        var e = it.querySelector(sel);
-        return e ? (e.textContent || '').trim() : '';
+        return textOf(it.querySelector(sel));
       }};
-      var title = txt(conf.title);
+      // 标题：没配选择器就用整行文字（「整行就是一条链接文本」的站点）
+      var title = conf.title ? txt(conf.title) : textOf(it);
       if (!title) continue;
       var cover = '';
       if (conf.cover) {{
         var c = it.querySelector(conf.cover);
         if (c) cover = c.getAttribute('src') || c.getAttribute('data-src') || '';
       }}
+      // 详情链接：没配选择器时，行自身是 a 用自己，否则用行内第一个 a
       var link = '';
       if (conf.link) {{
         var a = it.querySelector(conf.link);
-        if (a && a.getAttribute('href')) {{
-          try {{ link = new URL(a.getAttribute('href'), location.href).href; }}
-          catch (e2) {{ link = a.getAttribute('href'); }}
-        }}
+        if (a && a.getAttribute('href')) link = abs(a.getAttribute('href'));
+      }} else if (it.tagName === 'A' && it.getAttribute('href')) {{
+        link = abs(it.getAttribute('href'));
+      }} else {{
+        var a2 = it.querySelector('a[href]');
+        if (a2) link = abs(a2.getAttribute('href'));
       }}
       out.push({{ title: title, artist: txt(conf.artist), duration: txt(conf.duration),
                   cover: cover, link: link }});

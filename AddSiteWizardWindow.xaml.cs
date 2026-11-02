@@ -722,6 +722,16 @@ namespace musicPlayer
 
                 if (string.IsNullOrWhiteSpace(_sel.Title))
                 {
+                    // 标题没猜出来：先看这一行是不是本身就是一条链接（"搜索结果就是链接文本"的站点）。
+                    // 这种情况行内没有更细的标题元素可点，硬点只会一直撞"你点的就是整行"。
+                    var probe = await ProbeItemAsync();
+                    if (probe is { Ok: true, SelfLink: true })
+                    {
+                        SetPickStatus("这一行本身就是一条链接：标题=整行文字、详情链接=行自己的地址，都不用再点");
+                        txtPickHint.Text = "结果项即链接；右边预览对得上就直接「下一步」";
+                        return;
+                    }
+
                     SetPickStatus("结果项已设定，请再点一下这条结果里的标题文字");
                     await StartPickingAsync("title");
                 }
@@ -733,6 +743,22 @@ namespace musicPlayer
             catch (Exception ex)
             {
                 SetPickStatus("补全字段失败：" + ex.Message);
+            }
+        }
+
+        /// <summary>探查第一条结果项：是不是本身就是链接、行内有没有链接。</summary>
+        private async Task<SiteConfigService.ItemProbe?> ProbeItemAsync()
+        {
+            try
+            {
+                string raw = await _svc.ExecuteScriptAsync(
+                    SiteConfigService.BuildProbeItemScript(_sel.Item));
+                return SiteConfigService.ParseItemProbe(raw);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[添加向导] 探查结果项失败: {ex.Message}");
+                return null;
             }
         }
 
@@ -797,7 +823,16 @@ namespace musicPlayer
                             SetPickStatus("请点在搜索结果项**内部**（刚才那下点到了行外面）");
                             break;
                         case "is-root":
-                            SetPickStatus("这一下点的就是整行，请点它内部更具体的元素（比如标题文字）");
+                            if (_pickTarget == "title" || _pickTarget == "link")
+                            {
+                                // 用户点的就是整行本身：这正是"整行即链接"的站点。
+                                // 标题 → 留空（用整行文字）；详情链接 → 留空（用行自己的 href）。
+                                await ApplyPickAsync(new PickResult { Ok = true, Reason = "is-root" });
+                            }
+                            else
+                            {
+                                SetPickStatus("这一下点的就是整行，请点它内部更具体的元素（比如标题文字）");
+                            }
                             break;
                     }
                     return;
@@ -847,7 +882,11 @@ namespace musicPlayer
             if (target != "item")
             {
                 RenderSelectorRows();
-                SetPickStatus($"{FieldLabel(target)} 已设为 {Short(pick.Path)}");
+                SetPickStatus(pick.Path.Length == 0
+                    ? (target == "link"
+                        ? "详情链接留空：抓取时自动用行自身（或行内第一个）链接"
+                        : "标题留空：抓取时用整行文字当标题")
+                    : $"{FieldLabel(target)} 已设为 {Short(pick.Path)}");
                 await RefreshPreviewAsync();
             }
 
@@ -980,6 +1019,18 @@ namespace musicPlayer
                     {
                         Foreground = new SolidColorBrush(Color.FromArgb(0x70, 0xFF, 0xFF, 0xFF))
                     });
+
+                // 详情链接抓没抓到：这是"结果项/详情链接"配对了没有的直接判据
+                // （有链接 → 能嗅探试听/下载；没有 → 只能显示标题）
+                if (r.DetailUrl != null)
+                {
+                    tb.Inlines.Add(new Run("  🔗") { Foreground = Gold });
+                    tb.ToolTip = "详情页：" + r.DetailUrl;
+                }
+                else
+                {
+                    tb.Inlines.Add(new Run("  ·无链接") { Foreground = Dim });
+                }
 
                 previewList.Children.Add(tb);
             }

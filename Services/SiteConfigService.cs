@@ -558,6 +558,13 @@ namespace musicPlayer.Services
       var n = countOf(s);
       if (n >= 2 && n <= 500) return s;
     }
+    // 没有 class 的行（很多老站的 <li> 就是这样）：用标签选择器，前提是它确实重复出现。
+    // 不能落到"拼到唯一"那条兜底——那只会匹配到这一条，预览永远只显示 1 行。
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'li' || tag === 'tr' || tag === 'article' || tag === 'a' || tag === 'dd') {
+      var tc = countOf(tag);
+      if (tc >= 3 && tc <= 500) return tag;
+    }
     // 兜底：从自己往上拼，直到唯一（这种只能选中这一条，但总比没有强）
     var parts = [], cur = el;
     while (cur && cur !== document.documentElement && parts.length < 6) {
@@ -570,18 +577,23 @@ namespace musicPlayer.Services
     return parts.join(' > ');
   }
   // 从点到的元素向上找"重复出现的行容器"，让点击标题也能选中整行。
-  // 判据：同一选择器在页面里出现 3~300 次（少了不像列表，多了多半是按钮/图标之流）；
-  // 越靠上越优先（标题 > 整行，但整行通常才是我们想要的）。
+  // ① 先找 html 语义上的"行"（li / tr / article）——最贴近"一条结果"，也最不怕换皮；
+  // ② 没有语义行再看"重复出现的 class"，沿用老规则：越靠上越优先（整行 > 里面的标题）。
   function expandToRow(el) {
-    var bestEl = el, bestCount = 0, cur = el;
-    for (var i = 0; i < 6; i++) {
-      if (!cur || cur === document.body || cur === document.documentElement) break;
+    var i, cur;
+    for (i = 0, cur = el; i < 6 && cur && cur !== document.body && cur !== document.documentElement; i++, cur = cur.parentElement) {
+      var tag = cur.tagName.toLowerCase();
+      if (tag !== 'li' && tag !== 'tr' && tag !== 'article') continue;
+      var tc = countOf(tag);
+      if (tc >= 3 && tc <= 300) return cur;
+    }
+
+    var bestEl = el, bestCount = 0;
+    for (i = 0, cur = el; i < 6 && cur && cur !== document.body && cur !== document.documentElement; i++, cur = cur.parentElement) {
       var s = sig(cur);
-      if (s) {
-        var c = countOf(s);
-        if (c >= 3 && c <= 300 && c >= bestCount) { bestEl = cur; bestCount = c; }
-      }
-      cur = cur.parentElement;
+      if (!s) continue;
+      var c = countOf(s);
+      if (c >= 3 && c <= 300 && c >= bestCount) { bestEl = cur; bestCount = c; }
     }
     return bestEl;
   }
@@ -728,6 +740,53 @@ namespace musicPlayer.Services
             catch (Exception ex) when (ex is JsonException or InvalidOperationException)
             {
                 return new PickResult();
+            }
+        }
+
+        /// <summary>结果项元素本身的探查信息（"整行就是一个链接"的判断依据）。</summary>
+        public class ItemProbe
+        {
+            public bool Ok { get; init; }
+            public string Tag { get; init; } = "";
+
+            /// <summary>结果项自己就是 &lt;a href&gt;（标题=整行文字，详情链接=它自己）。</summary>
+            public bool SelfLink { get; init; }
+
+            /// <summary>行内至少有可用的 &lt;a href&gt;（详情链接可以留空自动兜底）。</summary>
+            public bool HasLink { get; init; }
+        }
+
+        /// <summary>探查第一条结果项：是不是链接、里面有没有链接。</summary>
+        public static string BuildProbeItemScript(string? itemSelector)
+        {
+            string sel = JsonSerializer.Serialize(itemSelector ?? "");
+            return "(function(){ var it = null; try { it = document.querySelector(" + sel + "); } catch(e) {}" +
+                   " if (!it) return JSON.stringify({ ok: false });" +
+                   " var a = it.tagName === 'A' ? it : it.querySelector('a[href]');" +
+                   " return JSON.stringify({ ok: true, tag: it.tagName.toLowerCase()," +
+                   "   selfLink: it.tagName === 'A' && !!it.getAttribute('href')," +
+                   "   hasLink: !!(a && a.getAttribute('href')) }); })()";
+        }
+
+        public static ItemProbe ParseItemProbe(string raw)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(Unwrap(raw));
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) return new ItemProbe();
+
+                return new ItemProbe
+                {
+                    Ok = GetBool(root, "ok"),
+                    Tag = GetString(root, "tag"),
+                    SelfLink = GetBool(root, "selfLink"),
+                    HasLink = GetBool(root, "hasLink")
+                };
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+            {
+                return new ItemProbe();
             }
         }
 
