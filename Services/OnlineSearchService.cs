@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -310,30 +311,38 @@ namespace musicPlayer.Services
         // ══════════════════════════════ 人机验证中转 ══════════════════════════════
 
         /// <summary>
-        /// 弹出验证窗口（UI 线程 ShowDialog 阻塞等待）。
+        /// 弹出验证窗口并等待用户完成（**非模态**，窗口不可见也不会锁死主界面）。
         /// skipNavigate=true：页面已经停在验证页上，窗口只负责把内核切挂过来。
         /// </summary>
-        private static Task<bool> ShowCaptchaWindowAsync(string currentUrl)
+        private static async Task<bool> ShowCaptchaWindowAsync(string currentUrl)
         {
             var dispatcher = Application.Current?.Dispatcher;
-            if (dispatcher == null) return Task.FromResult(false);
+            if (dispatcher == null) return false;
 
-            if (dispatcher.CheckAccess())
+            try
             {
-                return Task.FromResult(RunCaptchaWindow(currentUrl));
+                // 建窗/显示必须在 UI 线程；返回的 Task 在窗口关闭时完成。
+                // 注意：不能同步等待这个 Task（会在 UI 线程上死等），必须 await。
+                var showOp = dispatcher.InvokeAsync(() => RunCaptchaWindowAsync(currentUrl));
+                Task<CaptchaResult> windowTask = await showOp;
+                var result = await windowTask;
+                return result == CaptchaResult.Passed;
             }
-            return dispatcher.InvokeAsync(() => RunCaptchaWindow(currentUrl)).Task;
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[搜索] 打开验证窗口失败: {ex.Message}");
+                return false;
+            }
         }
 
-        private static bool RunCaptchaWindow(string currentUrl)
+        private static Task<CaptchaResult> RunCaptchaWindowAsync(string currentUrl)
         {
             Window? owner = Application.Current?.Windows
                 .OfType<Window>().FirstOrDefault(w => w.IsActive);
 
-            var result = CaptchaWindow.Run(owner, currentUrl,
+            return CaptchaWindow.ShowAsync(owner, currentUrl,
                 extraVerify: CaptchaVerifyHook ?? HasResultsOnCurrentPageAsync,
                 skipNavigate: true);
-            return result == CaptchaResult.Passed;
         }
 
         /// <summary>验证窗口的"通过"判据之一：当前页面已经能抓到结果项。</summary>

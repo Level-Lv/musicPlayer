@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using musicPlayer.Services;
 
@@ -32,6 +33,10 @@ namespace musicPlayer
     ///
     /// 全程只有一个 WebView2 实例 → Cookie 天然共享，后续搜索不会再被同一站点挑战。
     /// 这里**不做任何绕过**：识别 + 把真实页面交给用户，仅此而已。
+    ///
+    /// ⚠ 窗口是**非模态**的。之前用 ShowDialog 出过一次严重事故：窗口因为定位/置前失败
+    /// 没出现在屏幕上，但模态关系已经把主窗口禁用了 —— 用户看到的就是"程序卡死，
+    /// 但有声音、只能任务管理器结束"。非模态后最坏情况只是窗口没被看见，主窗口照常可用。
     /// </summary>
     public partial class CaptchaWindow : Window
     {
@@ -42,10 +47,12 @@ namespace musicPlayer
         private readonly Func<Task<bool>>? _extraVerify;
         private readonly bool _skipNavigate;
         private readonly DispatcherTimer _pollTimer;
+        private readonly DispatcherTimer _attentionTimer;   // 1.5 秒后自检"窗口真的看得见吗"
 
         private int _remaining = TimeoutSeconds;
         private bool _checking;
         private bool _closing;
+        private bool _attentionChecked;
         private CancellationTokenSource? _navCts;
 
         /// <summary>本窗口的结果（窗口关闭后读取）。</summary>
@@ -67,29 +74,164 @@ namespace musicPlayer
             _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _pollTimer.Tick += async (_, _) => await PollOnceAsync();
 
+            _attentionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+            _attentionTimer.Tick += (_, _) => CheckAttention();
+
             Loaded += OnLoaded;
             SizeChanged += (_, _) => SafeFitBounds();
             DpiChanged += (_, _) => SafeFitBounds();
-            SourceInitialized += (_, _) => WindowEffects.ApplyRoundedCorners(this);
+            SourceInitialized += (_, _) =>
+            {
+                PlaceOnScreen();                       // 先算好位置，别依赖 CenterOwner 的默认行为
+                WindowEffects.ApplyRoundedCorners(this);
+            };
         }
 
         /// <summary>
-        /// 打开验证窗口（模态）并返回是否通过。
-        /// 注意：内部会占住隐藏内核（串行闸门），期间不要并发发起别的在线任务。
+        /// 打开验证窗口并异步等待结果。**非模态**：不阻塞调用方的 UI 线程，
+        /// 即使窗口没能显示到前台，主界面仍然可用（用户可关掉它重试，而不是整程序卡死）。
         /// </summary>
-        public static CaptchaResult Run(Window? owner, string targetUrl,
+        public static Task<CaptchaResult> ShowAsync(Window? owner, string targetUrl,
             Func<Task<bool>>? extraVerify = null, bool skipNavigate = false)
         {
             var win = new CaptchaWindow(targetUrl, extraVerify, skipNavigate);
+            var tcs = new TaskCompletionSource<CaptchaResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            win.Closed += (_, _) => tcs.TrySetResult(win.Result);
+
             try
             {
                 if (owner != null && owner.IsVisible) win.Owner = owner;
             }
             catch { /* Owner 设置失败不影响功能 */ }
 
-            win.ShowDialog();
-            return win.Result;
+            win.Show();
+            win.BringToFront();
+
+            // 硬兜底：窗口若因任何原因既不关闭也不超时（例如内核卡住导致轮询全空转），
+            // 到点强制收尾，绝不让调用方（搜索流程）永远挂着。
+            var hardStop = new DispatcherTimer { Interval = TimeSpan.FromSeconds(TimeoutSeconds + 15) };
+            hardStop.Tick += (_, _) =>
+            {
+                hardStop.Stop();
+                App.LogCrash("[验证窗口] 硬超时，强制关闭");
+                try { if (win.IsVisible) win.Close(); } catch { }
+                tcs.TrySetResult(CaptchaResult.Timeout);
+            };
+            hardStop.Start();
+            win.Closed += (_, _) => hardStop.Stop();
+
+            return tcs.Task;
         }
+
+        #region 显示位置与置前（防"窗口看不见但卡住界面"）
+
+        /// <summary>
+        /// 显式把窗口放到"当前屏幕工作区中央"（Owner 在哪个屏就放哪个屏）。
+        /// 不用 WindowStartupLocation=CenterOwner：它在 Owner 最小化/跨屏/DPI 混合时
+        /// 可能算出屏幕外的坐标，结果就是"窗口存在但用户看不到"。
+        /// </summary>
+        private void PlaceOnScreen()
+        {
+            try
+            {
+                Rect area = GetWorkArea();
+
+                // 窗口比屏幕还大时先缩到工作区的 92%，避免标题栏被挤出屏幕
+                double w = Math.Min(Width, area.Width * 0.92);
+                double h = Math.Min(Height, area.Height * 0.92);
+                if (w > 0 && Math.Abs(w - Width) > 1) Width = w;
+                if (h > 0 && Math.Abs(h - Height) > 1) Height = h;
+
+                Left = area.Left + (area.Width - Width) / 2;
+                Top = area.Top + (area.Height - Height) / 2;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[验证窗口] 定位失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>取目标屏幕的工作区（DIP 单位；多屏按 Owner 所在屏）。</summary>
+        private Rect GetWorkArea()
+        {
+            System.Windows.Forms.Screen screen;
+            if (Owner != null && Owner.IsVisible)
+            {
+                screen = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(Owner).Handle);
+            }
+            else
+            {
+                screen = System.Windows.Forms.Screen.PrimaryScreen
+                         ?? System.Windows.Forms.Screen.AllScreens[0];
+            }
+
+            var wa = screen.WorkingArea;                              // 物理像素
+            var src = PresentationSource.FromVisual(this) as HwndSource;
+            double scale = src?.CompositionTarget?.TransformToDevice.M11 ?? 1.0;
+            if (scale <= 0) scale = 1.0;
+
+            return new Rect(wa.Left / scale, wa.Top / scale,
+                            Math.Max(1, wa.Width / scale), Math.Max(1, wa.Height / scale));
+        }
+
+        /// <summary>把窗口提到前台：最小化先还原、激活；仍不在前台则 Topmost 闪一下。</summary>
+        public void BringToFront()
+        {
+            try
+            {
+                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                Activate();
+                if (!IsActive)
+                {
+                    // 绕过系统"前台权限"限制的常用手法：瞬时置顶再取消
+                    Topmost = true;
+                    Topmost = false;
+                    Activate();
+                }
+            }
+            catch (Exception ex) { Debug.WriteLine($"[验证窗口] 置前失败: {ex.Message}"); }
+
+            App.LogCrash($"[验证窗口] 显示位置=({Left:F0},{Top:F0}) 尺寸={ActualWidth:F0}x{ActualHeight:F0} " +
+                         $"visible={IsVisible} active={IsActive} skipNavigate={_skipNavigate}");
+        }
+
+        /// <summary>
+        /// 1.5 秒后自检一次：窗口还在但不激活 / 跑到屏幕外 → 纠正一次并记日志。
+        /// 这是给"看不见的窗口"上的第二道保险（第一道是非模态，主界面不会再被锁）。
+        /// </summary>
+        private void CheckAttention()
+        {
+            _attentionTimer.Stop();
+            if (_attentionChecked || _closing || !IsVisible) return;
+            _attentionChecked = true;
+
+            try
+            {
+                Rect area = GetWorkArea();
+                var self = new Rect(Left, Top, ActualWidth, ActualHeight);
+                bool offScreen = !area.IntersectsWith(self) || self.Width < 80 || self.Height < 80;
+
+                if (offScreen)
+                {
+                    App.LogCrash($"[验证窗口] 疑似在屏幕外（rect={self}），重新定位");
+                    PlaceOnScreen();
+                }
+
+                if (!IsActive)
+                {
+                    App.LogCrash("[验证窗口] 1.5 秒后仍未激活，重新置前");
+                    BringToFront();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[验证窗口] 自检失败: {ex.Message}");
+            }
+        }
+
+        #endregion
 
         #region 生命周期
 
@@ -97,11 +239,26 @@ namespace musicPlayer
         {
             try
             {
+                App.LogCrash("[验证窗口] Loaded，开始初始化内核并切挂");
+
                 await _svc.InitAsync();
 
                 // 把同一内核切挂到本窗口的内容区（顶栏/底栏在矩形之外，不会被子窗口遮挡）
                 _svc.ShowIn(this, contentHost);
                 txtPlaceholder.Visibility = Visibility.Collapsed;
+                txtPlaceholder.Text = "";
+
+                // 布局刚完成时内容区的实际尺寸可能还差一两帧，补一次精确对齐
+                Dispatcher.BeginInvoke(new Action(SafeFitBounds), DispatcherPriority.Loaded);
+                await Task.Delay(120);
+                SafeFitBounds();
+
+                App.LogCrash("[验证窗口] 内核已切挂到窗口内容区");
+
+                // 轮询先开起来（超时计时真实可信），导航在后台继续
+                UpdateStatus();
+                _pollTimer.Start();
+                _attentionTimer.Start();
 
                 if (!_skipNavigate)
                 {
@@ -119,20 +276,27 @@ namespace musicPlayer
                     catch (Exception ex)
                     {
                         Debug.WriteLine($"[验证窗口] 导航失败: {ex.Message}");
-                        txtStatus.Text = "页面加载失败，可点「我已完成验证」重试检查";
+                        App.LogCrash("[验证窗口] 导航失败: " + ex.Message);
+                        if (!_closing) txtStatus.Text = "页面加载失败，可点「我已完成验证」重试检查";
                     }
                 }
-
-                UpdateStatus();
-                _pollTimer.Start();
             }
             catch (Exception ex)
             {
+                // 这里绝不能用 MessageBox：那是又一个会挡在前面的模态窗，
+                // 一旦它跑到后台，用户就彻底点不到任何东西了。
                 Debug.WriteLine($"[验证窗口] 初始化失败: {ex}");
+                App.LogCrash("[验证窗口] 初始化失败: " + ex);
+
                 Result = CaptchaResult.Failed;
-                _closing = true;
-                MessageBox.Show(this, "验证窗口初始化失败：" + ex.Message, "错误");
-                Close();
+                txtPlaceholder.Text = "验证页面初始化失败：" + ex.Message;
+                txtPlaceholder.Visibility = Visibility.Visible;
+                txtStatus.Text = "初始化失败，可关闭窗口后重试";
+                dotState.Fill = System.Windows.Media.Brushes.OrangeRed;
+
+                // 让失败状态停留 1.2 秒再自动关窗，避免用户还没看清就消失
+                await Task.Delay(1200);
+                Finish(CaptchaResult.Failed);
             }
         }
 
@@ -140,6 +304,7 @@ namespace musicPlayer
         {
             _closing = true;
             _pollTimer.Stop();
+            _attentionTimer.Stop();
             _navCts?.Cancel();
 
             // 必须在窗口销毁前把内核摘回隐藏宿主，否则 controller 的父句柄失效会崩。
@@ -156,6 +321,7 @@ namespace musicPlayer
                 if (_svc.ActiveOperationCount > 0)
                 {
                     Debug.WriteLine("[验证窗口] 关闭时仍有内核调用未结束，改用力释放内核");
+                    App.LogCrash("[验证窗口] 关闭时内核仍有调用在飞，强制释放内核");
                     _svc.ForceDisposeCore();
                 }
                 else
@@ -165,6 +331,7 @@ namespace musicPlayer
             }
             catch (Exception ex) { Debug.WriteLine($"[验证窗口] 归还内核失败: {ex.Message}"); }
 
+            App.LogCrash($"[验证窗口] 关闭，结果={Result}");
             base.OnClosing(e);
         }
 

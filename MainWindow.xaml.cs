@@ -1738,7 +1738,8 @@ namespace musicPlayer
 
                 win = new CaptchaWindow(demoUrl) { Owner = this };
                 win.Show();
-                Log($"窗口已打开 visible={win.IsVisible}");
+                win.BringToFront();   // 非模态窗口：必须显式置前，否则可能被主窗口盖住
+                Log($"窗口已打开 visible={win.IsVisible} rect=({win.Left:F0},{win.Top:F0})");
 
                 await System.Threading.Tasks.Task.Delay(2500); // 等导航完成
 

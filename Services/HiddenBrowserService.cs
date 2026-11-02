@@ -125,6 +125,12 @@ namespace musicPlayer.Services
             core.Settings.IsZoomControlEnabled = false;
             _controller.IsVisible = false;
 
+            // 内核"未绘制区域"的底色：默认是白色，切挂到可见窗口的瞬间会闪一大片白，
+            // 页面要是还没渲染完就一直是白的（看起来像"验证页没加载出来"）。
+            // 这里改成与界面一致的深色，视觉上和占位背景无缝衔接。
+            try { _controller.DefaultBackgroundColor = Color.FromArgb(255, 11, 11, 18); }
+            catch (Exception ex) { Debug.WriteLine($"[内核] 设置默认底色失败: {ex.Message}"); }
+
             // 拦截弹窗：任何 window.open/新标签一律取消（PRD F4.x"杜绝弹窗"）
             core.NewWindowRequested += (_, e) =>
             {
@@ -345,10 +351,30 @@ namespace musicPlayer.Services
             if (!_initialized)
                 throw new InvalidOperationException("内核尚未初始化，请先在 UI 线程调用 InitAsync");
 
-            _controller!.ParentWindow = new WindowInteropHelper(host).Handle;
-            _controller.IsVisible = true;
+            // 顺序很关键：
+            // ① 先隐藏（避免旧父窗口的残留画面/尺寸被带过去）
+            // ② 改挂父窗口
+            // ③ 设定精确矩形
+            // ④ 显示 + 通知内核"父窗口变了、位置变了"，让它重新计算并立刻重绘
+            //    ——少了 NotifyParentWindowPositionChanged，内核会沿用旧坐标，
+            //      表现为内容空白/白底/位置错位，直到下一次尺寸变化才恢复。
+            _controller!.IsVisible = false;
+            _controller.ParentWindow = new WindowInteropHelper(host).Handle;
             _isVisibleOnHost = true;
             FitBoundsTo(host, contentArea);
+            _controller.IsVisible = true;
+            NotifyParentWindowPositionChanged();
+        }
+
+        /// <summary>
+        /// 告诉内核父窗口的位置/尺寸变了（改挂父窗口、拖动、缩放后都要调）。
+        /// WebView2 靠这个通知重新计算相对坐标并触发重绘；不调的话切挂后可能一片空白。
+        /// </summary>
+        public void NotifyParentWindowPositionChanged()
+        {
+            if (!_initialized) return;
+            try { _controller!.NotifyParentWindowPositionChanged(); }
+            catch (Exception ex) { Debug.WriteLine($"[内核] 通知父窗口变更失败: {ex.Message}"); }
         }
 
         /// <summary>让内核精确填满宿主窗口里 contentArea 那块矩形（像素对齐，按 DPI 换算）。</summary>
@@ -356,6 +382,8 @@ namespace musicPlayer.Services
         {
             if (!_initialized || contentArea == null) return;
             _controller!.Bounds = ComputeBounds(host, contentArea);
+            // 窗口拖动/缩放/DPI 变化时也通知一次，保证内容跟着布局走（否则会停在旧位置）
+            if (_isVisibleOnHost) NotifyParentWindowPositionChanged();
         }
 
         /// <summary>把 WPF 元素矩形换算成父窗口客户区的物理像素矩形。</summary>

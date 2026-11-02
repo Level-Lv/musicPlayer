@@ -134,8 +134,12 @@ namespace musicPlayer
             }
         }
 
-        /// <summary>把异常文本追加到 %TEMP%\musicplayer_crash.log。</summary>
-        private static void LogCrash(string message)
+        /// <summary>
+        /// 把诊断文本追加到 %TEMP%\musicplayer_crash.log。
+        /// 之所以公开：验证窗口（CaptchaWindow）等"整个程序被模态锁死"的高风险环节
+        /// 需要在关键节点留痕，出问题时能直接看出窗口有没有真的显示出来、位置在哪。
+        /// </summary>
+        public static void LogCrash(string message)
         {
             try
             {

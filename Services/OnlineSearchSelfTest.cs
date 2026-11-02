@@ -128,6 +128,45 @@ namespace musicPlayer.Services
                 }
                 else Bad($"正常搜索失败：{outcome.Status} {outcome.Message}");
 
+                // ── 用例 5：人机验证中转全链路 ──
+                // 放在第 2 位而不是最后：手动模式（mode 2）需要用户立刻看到验证窗口，
+                // 若排在"失效选择器"（要等满 10 秒等待策略）之后就容易被误判成"程序卡住了"。
+                log("\n── 验证中转接入 ──");
+                var challengeSite = MakeSite("挑战站", challengeUrl + "?q={q}",
+                    item: ".song", title: ".t");
+                if (autoCaptcha)
+                {
+                    // 自动模式：验证窗口每秒轮询 extraVerify，这里注入"点掉挑战"的逻辑
+                    int hookCalls = 0;
+                    log("  已注入自动过验证钩子（窗口轮询时应每秒调用一次）");
+                    OnlineSearchService.CaptchaVerifyHook = async () =>
+                    {
+                        hookCalls++;
+                        string raw = await svc.ExecuteScriptAsync(
+                            "if (typeof passNow === 'function') { passNow(); 'ok'; } else { 'no-passNow'; }", ct);
+                        log($"    [钩子] 第 {hookCalls} 次调用 → {raw}");
+                        await Task.CompletedTask;
+                        return true;
+                    };
+                }
+                else
+                {
+                    log("  即将弹出验证窗口（非模态）：请在弹出的窗口里点「模拟完成验证」按钮");
+                    ShowToastHint?.Invoke("请在弹出的验证窗口里点「模拟完成验证」按钮");
+                }
+                try
+                {
+                    sw.Restart();
+                    outcome = await RunLoggedSearchAsync(challengeSite, "挑战曲", log, ct);
+                    if (outcome.Status == OnlineSearchStatus.Ok && outcome.Results.Count == 3)
+                        Ok($"验证通过后续抓成功：{outcome.Results.Count} 条（{sw.ElapsedMilliseconds} ms）");
+                    else Bad($"验证流程异常：{outcome.Status} {outcome.Message}");
+                }
+                finally
+                {
+                    OnlineSearchService.CaptchaVerifyHook = null;
+                }
+
                 // ── 用例 2：空结果 ──
                 log("\n── 空结果 ──");
                 var emptySite = MakeSite("空页站", emptyUrl + "?q={q}",
@@ -155,41 +194,6 @@ namespace musicPlayer.Services
                     Ok($"NavFailed：{outcome.Message}");
                 else Bad($"应为 NavFailed，实际 {outcome.Status}");
 
-                // ── 用例 5：人机验证中转全链路 ──
-                log("\n── 验证中转接入 ──");
-                var challengeSite = MakeSite("挑战站", challengeUrl + "?q={q}",
-                    item: ".song", title: ".t");
-                if (autoCaptcha)
-                {
-                    // 自动模式：验证窗口每秒轮询 extraVerify，这里注入"点掉挑战"的逻辑
-                    int hookCalls = 0;
-                    log("  已注入自动过验证钩子（窗口轮询时应每秒调用一次）");
-                    OnlineSearchService.CaptchaVerifyHook = async () =>
-                    {
-                        hookCalls++;
-                        string raw = await svc.ExecuteScriptAsync(
-                            "if (typeof passNow === 'function') { passNow(); 'ok'; } else { 'no-passNow'; }", ct);
-                        log($"    [钩子] 第 {hookCalls} 次调用 → {raw}");
-                        await Task.CompletedTask;
-                        return true;
-                    };
-                }
-                else
-                {
-                    ShowToastHint?.Invoke("请在弹出的验证窗口里点「模拟完成验证」按钮");
-                }
-                try
-                {
-                    sw.Restart();
-                    outcome = await RunLoggedSearchAsync(challengeSite, "挑战曲", log, ct);
-                    if (outcome.Status == OnlineSearchStatus.Ok && outcome.Results.Count == 3)
-                        Ok($"验证通过后续抓成功：{outcome.Results.Count} 条（{sw.ElapsedMilliseconds} ms）");
-                    else Bad($"验证流程异常：{outcome.Status} {outcome.Message}");
-                }
-                finally
-                {
-                    OnlineSearchService.CaptchaVerifyHook = null;
-                }
 
                 // ── 用例 6：取消（等到进入"等待结果"阶段再取消，保证确定性）──
                 // 注意：Progress<T> 的回调总是 Post 到 UI 队列，搜索太快时来不及执行；
@@ -303,10 +307,31 @@ namespace musicPlayer.Services
 
         /// <summary>模拟挑战页：过验证（移除挑战元素）后注入结果项，模拟"验证完直接落到结果页"。</summary>
         private const string DemoChallengeHtml = @"<!DOCTYPE html>
-<html><head><meta charset=""utf-8""><title>Just a moment...</title></head>
+<html><head><meta charset=""utf-8""><title>Just a moment...</title>
+<style>
+  /* 刻意做成深色验证页：一是贴近真实站点（CF/geetest 都是居中卡片），
+     二是能一眼看出「内核真的渲染出内容了」——纯白页会让人怀疑是不是白屏没加载。 */
+  html,body { height:100%; }
+  body { margin:0; display:flex; align-items:center; justify-content:center;
+         font-family:'Segoe UI','Microsoft YaHei UI'; background:#101018; color:#DDDDDD; }
+  .card { width:380px; padding:32px 28px; border-radius:16px; background:#181826;
+          border:1px solid #26FFFFFF; text-align:center; box-shadow:0 18px 50px rgba(0,0,0,.45); }
+  .spin { width:46px; height:46px; margin:0 auto 18px; border-radius:50%;
+          border:3px solid #33FFC107; border-top-color:#FFC107; animation:sp 1s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  h2 { font-size:16px; margin:0 0 10px; }
+  p  { font-size:12.5px; color:#8F8F9A; line-height:1.7; margin:0 0 18px; }
+  button { padding:11px 22px; border:none; border-radius:10px; cursor:pointer;
+           background:#FFC107; color:#1A1A1A; font-size:13px; font-weight:600; }
+  #results { display:none; }
+</style></head>
 <body>
-  <h2 id=""challenge-running"">正在验证您是否是真人…</h2>
-  <p><button id=""btnPass"" onclick=""passNow()"">模拟完成验证</button></p>
+  <div class=""card"" id=""card"">
+    <div class=""spin""></div>
+    <h2 id=""challenge-running"">正在验证您是否是真人…</h2>
+    <p>本地模拟挑战页：用于验证「检测 → 弹窗 → 通过 → 自动续抓」整条链路。</p>
+    <p><button id=""btnPass"" onclick=""passNow()"">模拟完成验证</button></p>
+  </div>
   <div id=""results""></div>
   <script>
     function passNow() {
@@ -314,6 +339,10 @@ namespace musicPlayer.Services
       if (el) el.remove();
       var btn = document.getElementById('btnPass');
       if (btn) btn.remove();
+      var card = document.getElementById('card');
+      if (card) card.style.display = 'none';
+      var box = document.getElementById('results');
+      if (box) box.style.display = 'block';
       document.title = '搜索结果';
 " + RenderItemsJs + @"
     }
