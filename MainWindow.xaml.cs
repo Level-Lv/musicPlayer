@@ -102,6 +102,9 @@ namespace musicPlayer
             // 人机验证窗口测试入口（保留）：MP_ONLINE_CAPTCHA_TEST=1/2，见方法注释
             _ = RunCaptchaWindowTestIfRequestedAsync();
 
+            // 搜索引擎自检入口（S4，保留）：MP_ONLINE_SEARCH_TEST=1/2，见方法注释
+            _ = RunSearchSelfTestIfRequestedAsync();
+
             // 初始化数据库（建库、建表、迁移旧 setting.json）
             Db.Initialize();
 
@@ -1779,6 +1782,47 @@ namespace musicPlayer
                 try { win?.Close(); } catch { }
 
                 string path = Path.Combine(Path.GetTempPath(), "musicplayer_captchatest.log");
+                try { File.WriteAllText(path, sb.ToString()); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 搜索引擎自检（保留的测试代码，S4 对应，全部用本地模拟页、不依赖外网）：
+        /// - <c>MP_ONLINE_SEARCH_TEST=1</c>：全自动跑全部 7 组用例（含"挑战页 → 自动过验证 → 续抓"）；
+        /// - <c>MP_ONLINE_SEARCH_TEST=2</c>：同上，但验证环节需要你**手动点**模拟挑战页里的
+        ///   「模拟完成验证」按钮（验证"人点 → 程序检测 → 续抓"的真实链路）。
+        /// 结果写 <c>%TEMP%\musicplayer_searchtest.log</c>。
+        /// 注意：不要和 MP_ONLINE_SELFTEST / MP_ONLINE_CAPTCHA_TEST 同时开，会抢同一个内核。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunSearchSelfTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_SEARCH_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(2500); // 等主窗口与数据库就绪
+
+            var sb = new System.Text.StringBuilder();
+            void Log(string s) => sb.AppendLine(s);
+            Services.OnlineSearchSelfTest.ShowToastHint =
+                msg => ShowToast(msg, warning: false);
+
+            try
+            {
+                Log($"[{DateTime.Now:HH:mm:ss}] 搜索引擎自检（MP_ONLINE_SEARCH_TEST={mode}）");
+                bool ok = await Services.OnlineSearchSelfTest.RunAsync(Log, autoCaptcha: mode == "1");
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {ok}");
+                ShowToast(ok ? "搜索引擎自检：全部通过" : "搜索引擎自检：存在失败项，详见日志",
+                    warning: !ok);
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("搜索引擎自检失败，详见 %TEMP%\\musicplayer_searchtest.log", warning: true);
+            }
+            finally
+            {
+                Services.OnlineSearchSelfTest.ShowToastHint = null;
+                string path = Path.Combine(Path.GetTempPath(), "musicplayer_searchtest.log");
                 try { File.WriteAllText(path, sb.ToString()); } catch { }
             }
         }
