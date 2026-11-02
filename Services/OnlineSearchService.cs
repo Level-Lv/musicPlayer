@@ -41,6 +41,25 @@ namespace musicPlayer.Services
 
     public enum OnlineSearchPhase { Searching, Waiting, Completed, Failed }
 
+    /// <summary>
+    /// 播放地址解析结果（S8）。
+    /// <see cref="Url"/> 非空且 <see cref="IsStream"/> 为 false 时才能直接交给 MediaElement。
+    /// </summary>
+    public class AudioResolveResult
+    {
+        /// <summary>解析到的地址（不可用时为 null）。</summary>
+        public string? Url { get; init; }
+
+        /// <summary>是否流媒体索引（m3u8/mpd/m4s）——能下载但播不了。</summary>
+        public bool IsStream { get; init; }
+
+        /// <summary>不可用/需要下载时给用户看的一句话。</summary>
+        public string Reason { get; init; } = "";
+
+        /// <summary>能否直接在线试听。</summary>
+        public bool CanPlay => !string.IsNullOrWhiteSpace(Url) && !IsStream;
+    }
+
     /// <summary>搜索过程进度上报（Searching/Waiting/Completed/Failed）。</summary>
     public class OnlineSearchProgress
     {
@@ -236,6 +255,203 @@ namespace musicPlayer.Services
             var snapshot = await RunScrapeAsync(BuildExtractScript(selectors), ct);
             return (snapshot.Items, snapshot.SelectorError);
         }
+
+        // ══════════════════════════════ 播放地址解析（S8）══════════════════════════════
+
+        /// <summary>详情页嗅探上限（清单规定 6s：超过就当这条路走不通）。</summary>
+        public static readonly TimeSpan AudioSniffTimeout = TimeSpan.FromSeconds(6);
+
+        /// <summary>详情页导航超时（打不开也继续尝试提取，只是不无限等）。</summary>
+        private static readonly TimeSpan DetailNavTimeout = TimeSpan.FromSeconds(8);
+
+        /// <summary>
+        /// 解析某条在线结果的播放地址，三层兜底（顺序 = 快 → 慢 → 最慢）：
+        /// ① 结果里已带直链（列表页就有 src 的站点）→ 直接用，零开销；
+        /// ② 打开详情页后从 DOM/页面脚本里**静态提取**音频地址（`&lt;audio src&gt;`、`data-src`、
+        ///    JSON 里的 mp3 链接）——多数站点这一步就能拿到；
+        /// ③ 只在"点了播放才请求音频"的站点上，才注入"自动点播放"并嗅探 6s。
+        /// </summary>
+        /// <param name="result">结果条目（命中后会回填 <see cref="OnlineResult.AudioUrl"/>）。</param>
+        public static async Task<AudioResolveResult> ResolveAudioAsync(OnlineResult result,
+            CancellationToken ct = default)
+        {
+            // ① 已有地址：可能是上次播放时解析好的
+            if (!string.IsNullOrWhiteSpace(result.AudioUrl))
+            {
+                var cached = DecideForUrl(result.AudioUrl!);
+                if (cached.Url != null) return cached;
+            }
+
+            if (string.IsNullOrWhiteSpace(result.DetailUrl))
+            {
+                return new AudioResolveResult { Reason = "这条结果没有详情页链接，无法解析播放地址" };
+            }
+
+            // ② 打开详情页（超时/HTTP 错误都继续：有的站点 404 页里也带播放器）
+            try
+            {
+                using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                navCts.CancelAfter(DetailNavTimeout);
+                await Svc.NavigateAsync(result.DetailUrl!, navCts.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                Svc.StopLoading();          // 我们自己的导航超时：页面可能已经能用，继续往下走
+            }
+            catch (OnlineNavigationException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[播放] 详情页导航失败({ex.Status})，继续尝试提取");
+            }
+
+            // ③ 静态提取（快）
+            var fromPage = await TryExtractFromPageAsync(ct);
+            if (fromPage?.Url != null)
+            {
+                if (fromPage.CanPlay) result.AudioUrl = fromPage.Url;
+                return fromPage;
+            }
+
+            // ④ 动态嗅探（慢，只给"点了才加载"的站点）
+            AudioSniffedEventArgs? hit;
+            try
+            {
+                hit = await Svc.WaitForAudioAsync(AudioSniffTimeout, AutoPlayKickScript, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return new AudioResolveResult { Reason = "嗅探音频失败：" + ex.Message };
+            }
+
+            if (hit == null)
+            {
+                return new AudioResolveResult { Reason = "没有嗅探到音频（可能需要登录，或该页不提供试听）" };
+            }
+
+            var resolved = DecideForUrl(hit.Url, hit.IsStream);
+            if (resolved.Url != null && !resolved.IsStream)
+            {
+                result.AudioUrl = resolved.Url;   // 回填：同一条结果再播/下载时不必重新解析
+            }
+            return resolved;
+        }
+
+        /// <summary>
+        /// 从当前页面静态提取音频候选地址（纯 DOM/脚本分析，不发请求）。
+        /// 返回第一个"能直接播"的候选；没有直链但有流媒体候选时返回它（让上层给出"下载后播放"的提示）。
+        /// </summary>
+        private static async Task<AudioResolveResult?> TryExtractFromPageAsync(CancellationToken ct)
+        {
+            List<string> candidates;
+            try
+            {
+                string raw = await Svc.ExecuteScriptAsync(AudioCandidateScript, ct);
+                using var doc = JsonDocument.Parse(UnwrapScriptResult(raw));
+                if (doc.RootElement.ValueKind != JsonValueKind.Object ||
+                    !doc.RootElement.TryGetProperty("candidates", out var arr) ||
+                    arr.ValueKind != JsonValueKind.Array)
+                    return null;
+
+                candidates = new List<string>();
+                foreach (var item in arr.EnumerateArray())
+                {
+                    string? s = item.GetString();
+                    if (!string.IsNullOrWhiteSpace(s)) candidates.Add(s!);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[播放] 静态提取失败（继续嗅探）: {ex.Message}");
+                return null;
+            }
+
+            AudioResolveResult? streamHit = null;
+            foreach (string url in candidates)
+            {
+                var decided = DecideForUrl(url);
+                if (decided.CanPlay) return decided;
+                streamHit ??= decided.Url != null ? decided : null;
+            }
+            return streamHit;
+        }
+
+        /// <summary>
+        /// 静态提取脚本：扫 `audio/video[src]`、`source[src]`、`data-src/data-url/data-mp3/data-audio`，
+        /// 再在整页 HTML 里正则捞音频地址（不少站点把 mp3 写在内联 JSON 里）。
+        /// 全部转绝对地址、去重、最多 20 个——宁可多给几个让 C# 侧挑第一个能播的。
+        /// </summary>
+        public const string AudioCandidateScript =
+            @"(function(){
+  function abs(u){ if(!u) return ''; try{ return new URL(u, location.href).href; }catch(e){ return ''; } }
+  var found = [];
+  function add(u){ u = abs(u); if(u) found.push(u); }
+  var tagged = document.querySelectorAll('audio[src],audio source[src],video[src],video source[src]');
+  for (var i=0;i<tagged.length && i<40;i++) add(tagged[i].getAttribute('src'));
+  var attrs = ['data-src','data-url','data-mp3','data-audio','data-play'];
+  var nodes = document.querySelectorAll('[data-src],[data-url],[data-mp3],[data-audio],[data-play]');
+  for (var j=0;j<nodes.length && j<120;j++)
+    for (var k=0;k<attrs.length;k++) if (nodes[j].hasAttribute(attrs[k])) add(nodes[j].getAttribute(attrs[k]));
+  try {
+    var html = document.documentElement.innerHTML;
+    var re = /https?:\/\/[^\s'""<>\\()]+?\.(?:mp3|m4a|flac|wav|ogg|aac|m3u8)(?:\?[^\s'""<>\\()]*)?/gi;
+    var m, guard = 0;
+    while ((m = re.exec(html)) && guard++ < 20) found.push(m[0]);
+  } catch(e) {}
+  var seen = {}, out = [];
+  for (var x=0;x<found.length && out.length<20;x++) { if(!seen[found[x]]) { seen[found[x]] = 1; out.push(found[x]); } }
+  return JSON.stringify({ candidates: out });
+})()";
+
+        /// <summary>
+        /// 地址 → 能否用 MediaElement 直接播（纯函数，自检直接断言）。
+        ///
+        /// 能播：mp3 / m4a / flac / wav / ogg / aac 等直链，以及响应头是 audio/* 的地址。
+        /// 不能播：HLS/DASH 索引与分片（m3u8/mpd/m4s/ts——WPF MediaElement 不支持，S9 用 ffmpeg 下载后播）、
+        ///         blob:/data: 这类只存在于页面内的临时流。
+        /// </summary>
+        /// <param name="isStreamHint">已知是否流媒体（嗅探结果自带）；null 表示按扩展名推断。</param>
+        public static AudioResolveResult DecideForUrl(string url, bool? isStreamHint = null)
+        {
+            url = (url ?? "").Trim();
+            if (url.Length == 0) return new AudioResolveResult { Reason = "播放地址为空" };
+
+            if (url.StartsWith("blob:", StringComparison.OrdinalIgnoreCase) ||
+                url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                return new AudioResolveResult { Url = null, Reason = "音频是页面内部临时流（blob/data），无法直接播放" };
+            }
+
+            bool isStream = isStreamHint
+                            ?? (HiddenBrowserService.IsAudioResource(url, out bool extStream) && extStream);
+            if (isStream)
+            {
+                return new AudioResolveResult
+                {
+                    Url = url,
+                    IsStream = true,
+                    Reason = "该站点是流媒体（HLS/DASH），暂不支持在线试听，可下载后播放"
+                };
+            }
+
+            return new AudioResolveResult { Url = url };
+        }
+
+        /// <summary>
+        /// 嗅探中途注入的"自动播放"脚本：把页面上的 &lt;audio&gt;/&lt;video&gt; 拉起来，
+        /// 再点一下常见播放按钮。跑在**静音的隐藏内核**里，不会出声。
+        /// </summary>
+        public const string AutoPlayKickScript =
+            @"(function(){
+  window.__mpKick = (window.__mpKick || 0) + 1;
+  try{
+  var m = document.querySelectorAll('audio,video');
+  for (var i=0;i<m.length;i++){ try{ m[i].muted = true; m[i].play(); }catch(e){} }
+  var sels = ['.play','.play-btn','.btn-play','[data-action=play]','[aria-label=播放]','#play','.jp-play','.aplayer-play'];
+  for (var j=0;j<sels.length;j++){ var b=document.querySelector(sels[j]); if(b){ try{ b.click(); }catch(e2){} break; } }
+}catch(err){} return 'ok';})()";
 
         // ══════════════════════════════ 单次搜索流程 ══════════════════════════════
 

@@ -9,6 +9,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -63,6 +64,25 @@ namespace musicPlayer
         /// <summary>随机模式下"这一轮"还没播过的歌（一轮不重复的关键）。</summary>
         private readonly List<TrackItem> shuffleBag = new();
 
+        /// <summary>
+        /// 在线播放队列（S8）：点在线结果试听时建立，元素是"在线 TrackItem"（不落盘）。
+        /// 为空表示当前队列就是本地可见列表——两条来源共用下面这一套 next/prev/随机逻辑。
+        /// </summary>
+        private readonly List<TrackItem> onlineQueue = new();
+
+        /// <summary>
+        /// 播放代次：每次"发起播放意图"（点播/切歌/停止）都 +1。
+        /// 在线地址解析是异步的（最多 6 秒），回来时若代次已变，说明用户早切走了，结果直接丢弃。
+        /// </summary>
+        private int playGeneration;
+
+        /// <summary>
+        /// 当前播放队列：在线试听 = 在线队列；否则 = 本地可见列表。
+        /// 上一首/下一首/播放方式/自然播完全部只看这里，不区分曲目来源（PRD F5.2"与本地队列混排"）。
+        /// </summary>
+        private IReadOnlyList<TrackItem> PlayQueue =>
+            onlineQueue.Count > 0 ? (IReadOnlyList<TrackItem>)onlineQueue : VisibleTracks;
+
         private PlayMode playMode = PlayMode.Sequential;
         private bool isPlaying;
         private bool isMuted;
@@ -114,6 +134,9 @@ namespace musicPlayer
 
             // 站点面板自检入口（S7，保留）：MP_ONLINE_MANAGER_TEST=1/2，见方法注释
             _ = RunSiteManagerTestIfRequestedAsync();
+
+            // 在线试听自检入口（S8，保留）：MP_ONLINE_PLAY_TEST=1/2，见方法注释
+            _ = RunPlaybackTestIfRequestedAsync();
 
             // 站点状态自愈（S7）：搜索把站点标成 need_login/broken 时，就地提示 + 同步内存状态
             OnlineSearchService.SiteStatusChanged += OnOnlineSiteStatusChanged;
@@ -961,37 +984,62 @@ namespace musicPlayer
 
         #region 播放控制
 
-        /// <summary>播放指定曲目（含失效检测、失败计数、状态与 UI 同步）。</summary>
+        /// <summary>
+        /// 播放指定曲目（含失效检测、失败计数、状态与 UI 同步）。
+        /// 本地曲目与在线曲目走同一个入口：唯一的区别是"播放源从哪来"
+        /// （本地 = 文件路径，在线 = StreamUrl），其余播放器 UI 完全一致（S8）。
+        /// </summary>
         private void PlayTrack(TrackItem track)
         {
-            // ---- 播放前失效检测（PRD 5.1）----
-            if (!File.Exists(track.FullPath))
-            {
-                Db.RemoveTrackByPath(track.FullPath);
-                libraryCache.RemoveAll(t => t.FullPath == track.FullPath);
-                VisibleTracks.Remove(track);
-                shuffleBag.Clear();
-                ShowToast("文件不存在，已从音乐库移除。", warning: true);
+            playGeneration++;   // 新的播放意图：让还在飞的在线地址解析结果作废
 
-                if (currentTrack != null && currentTrack.FullPath == track.FullPath)
+            if (!track.IsOnline)
+            {
+                // 播本地曲目 → 队列回落到本地可见列表（在线队列作废，避免"上一首"跳到上次搜索结果里）
+                if (onlineQueue.Count > 0) onlineQueue.Clear();
+
+                // ---- 播放前失效检测（PRD 5.1）----
+                if (!File.Exists(track.FullPath))
                 {
-                    currentTrack = null;
-                    AdvanceToNext(manual: true); // 正在播的失效了 → 自动跳下一首
+                    Db.RemoveTrackByPath(track.FullPath);
+                    libraryCache.RemoveAll(t => t.FullPath == track.FullPath);
+                    VisibleTracks.Remove(track);
+                    shuffleBag.Clear();
+                    ShowToast("文件不存在，已从音乐库移除。", warning: true);
+
+                    if (currentTrack != null && currentTrack.IdentityKey == track.IdentityKey)
+                    {
+                        currentTrack = null;
+                        AdvanceToNext(manual: true); // 正在播的失效了 → 自动跳下一首
+                    }
+                    return;
                 }
+            }
+            else if (string.IsNullOrWhiteSpace(track.StreamUrl))
+            {
+                // 调用方必须先解析出地址（PlayQueueTrackAsync / PlayOnlineResultAsync 负责）
+                ShowToast("这条结果还没解析出播放地址", warning: true);
                 return;
             }
+
+            // 防双声断言（S8）：播放前再确认一次隐藏内核静音。
+            // 详情页嗅探时注入的"自动点播放"脚本会让页面里的 <audio> 出声，
+            // 若内核没静音就会和 MediaElement 一起响（同一首歌叠两遍，非常刺耳）。
+            bool coreMuted = HiddenBrowserService.Instance.EnsureMutedCore();
+            if (!coreMuted)
+                App.LogCrash("[播放] 警告：隐藏内核未静音，可能出现双声");
 
             // 直接换 Source：MediaElement 会自动关闭旧媒体并打开新的，
             // 这个过程不会触发 MediaEnded，所以不会误触发"自动切下一首"
             try
             {
-                mediaPlayer.Source = new Uri(track.FullPath);
+                mediaPlayer.Source = new Uri(track.IsOnline ? track.StreamUrl! : track.FullPath);
                 mediaPlayer.Play();
                 ApplyVolume();
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"播放失败 {track.FullPath}: {ex.Message}");
+                Debug.WriteLine($"播放失败 {track.PlayUrl}: {ex.Message}");
                 HandlePlayFailure();
                 return;
             }
@@ -1001,17 +1049,28 @@ namespace musicPlayer
             UpdatePlayingMarkers();
 
             txtWindowTitle.Text = track.Title;
-            Title = $"正在播放: {track.Title} - 音乐播放器";
+            Title = track.IsOnline
+                ? $"正在播放(在线): {track.Title} - 音乐播放器"
+                : $"正在播放: {track.Title} - 音乐播放器";
 
-            // 记住这次播放（重启后加载但不自动播）
-            Db.SetLastTrackPath(track.FullPath);
+            // 记住这次播放（重启后加载但不自动播）——只记本地文件，在线地址会过期
+            if (!track.IsOnline) Db.SetLastTrackPath(track.FullPath);
 
-            LoadLyricsForCurrentSong(track.FullPath);
+            // 歌词：在线曲目没有 .lrc 可找，改显示曲目信息卡（PRD F5.3）
+            if (track.IsOnline)
+                ShowOnlineTrackInfoCard(track);
+            else
+                LoadLyricsForCurrentSong(track.FullPath);
 
             // 播放态 UI
             isPlaying = true;
             btnPlayPause.Content = "⏸️";
             timer.Start();
+
+            if (track.IsOnline)
+            {
+                App.LogCrash($"[播放] 在线流播「{track.Title}」源={track.StreamUrl} 内核静音={coreMuted}");
+            }
         }
 
         /// <summary>播放失败：计数，自动跳下一首；连续 5 首失败则暂停并提示（PRD 5.6）。</summary>
@@ -1029,15 +1088,40 @@ namespace musicPlayer
             AdvanceToNext(manual: true);
         }
 
-        /// <summary>当前曲目在可见队列中的下标，找不到返回 -1。</summary>
+        /// <summary>
+        /// 当前曲目在**当前播放队列**中的下标，找不到返回 -1。
+        /// 队列可能是本地可见列表，也可能是在线试听队列（S8），两者用 IdentityKey 比较
+        /// （在线条目没有文件路径，不能拿 FullPath 比）。
+        /// </summary>
         private int IndexOfCurrent()
         {
             if (currentTrack == null) return -1;
-            for (int i = 0; i < VisibleTracks.Count; i++)
+            var queue = PlayQueue;
+            for (int i = 0; i < queue.Count; i++)
             {
-                if (VisibleTracks[i].FullPath == currentTrack.FullPath) return i;
+                if (queue[i].IdentityKey == currentTrack.IdentityKey) return i;
             }
             return -1;
+        }
+
+        /// <summary>
+        /// 把"当前曲目"同步到界面上对应的列表（本地列表 or 在线结果列表），并滚动到可见位置。
+        /// 在线条目回指 <see cref="TrackItem.OnlineSource"/>，才能在结果列表里选中同一行。
+        /// </summary>
+        private void SelectInQueue(TrackItem track)
+        {
+            if (track.IsOnline)
+            {
+                if (track.OnlineSource is { } source)
+                {
+                    onlineResultsList.SelectedItem = source;
+                    onlineResultsList.ScrollIntoView(source);
+                }
+                return;
+            }
+
+            musicfilesListView.SelectedItem = track;
+            musicfilesListView.ScrollIntoView(track);
         }
 
         /// <summary>从随机池里抽一首（一轮内不重复；池空则开启新一轮）。</summary>
@@ -1046,13 +1130,13 @@ namespace musicPlayer
             // 把当前正在播的从池里去掉
             if (currentTrack != null)
             {
-                shuffleBag.RemoveAll(t => t.FullPath == currentTrack.FullPath);
+                shuffleBag.RemoveAll(t => t.IdentityKey == currentTrack.IdentityKey);
             }
 
             if (shuffleBag.Count == 0)
             {
                 // 新一轮：全部可见曲目入池
-                shuffleBag.AddRange(VisibleTracks);
+                shuffleBag.AddRange(PlayQueue);
                 if (shuffleBag.Count == 0) return null;
             }
 
@@ -1062,10 +1146,14 @@ namespace musicPlayer
             return pick;
         }
 
-        /// <summary>切到下一首。manual=false（自然播完）时顺序模式到末尾即停止。</summary>
+        /// <summary>
+        /// 切到下一首。manual=false（自然播完）时顺序模式到末尾即停止。
+        /// 队列来源不区分本地/在线：在线条目播之前会先确保地址已解析（S8）。
+        /// </summary>
         private void AdvanceToNext(bool manual)
         {
-            if (VisibleTracks.Count == 0) return;
+            var queue = PlayQueue;
+            if (queue.Count == 0) return;
 
             TrackItem? next;
             if (playMode == PlayMode.Shuffle)
@@ -1076,7 +1164,7 @@ namespace musicPlayer
             else
             {
                 int nextIndex = IndexOfCurrent() + 1;
-                if (nextIndex >= VisibleTracks.Count)
+                if (nextIndex >= queue.Count)
                 {
                     if (!manual)
                     {
@@ -1085,19 +1173,45 @@ namespace musicPlayer
                     }
                     nextIndex = 0; // 手动点下一首则回环
                 }
-                next = VisibleTracks[nextIndex];
+                next = queue[nextIndex];
             }
 
-            musicfilesListView.SelectedItem = next;
-            musicfilesListView.ScrollIntoView(next);
-            PlayTrack(next);
+            SelectInQueue(next);
+            _ = PlayQueueTrackAsync(next);
+        }
+
+        /// <summary>
+        /// 播放队列里的一条：本地直接播；在线若还没地址就先解析（详情页嗅探），拿到再播。
+        /// 解析失败只提示、不跳歌——自动连环失败比停下来更让人困惑。
+        ///
+        /// 解析可能耗时几秒（嗅探上限 6s），期间用户很可能又点了别的/按了停止：
+        /// 用 playGeneration 做"代次"校验，过期的解析结果直接丢弃，不会把已经切走的播放拽回来。
+        /// </summary>
+        private async System.Threading.Tasks.Task PlayQueueTrackAsync(TrackItem track)
+        {
+            int generation = ++playGeneration;
+
+            if (!track.IsOnline)
+            {
+                PlayTrack(track);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(track.StreamUrl))
+            {
+                bool ok = await ResolveOnlineTrackAsync(track);
+                if (generation != playGeneration) return;   // 期间又发起了一次播放 → 这次作废
+                if (!ok) return;
+            }
+            PlayTrack(track);
         }
 
         private void btnNext_Click(object? sender, RoutedEventArgs e) => AdvanceToNext(manual: true);
 
         private void btnPrevious_Click(object? sender, RoutedEventArgs e)
         {
-            if (VisibleTracks.Count == 0) return;
+            var queue = PlayQueue;
+            if (queue.Count == 0) return;
 
             TrackItem? prev;
             if (playMode == PlayMode.Shuffle)
@@ -1107,15 +1221,14 @@ namespace musicPlayer
             else
             {
                 int idx = IndexOfCurrent();
-                int prevIndex = (idx <= 0 ? VisibleTracks.Count : idx) - 1; // 回环
-                prev = VisibleTracks[prevIndex];
+                int prevIndex = (idx <= 0 ? queue.Count : idx) - 1; // 回环
+                prev = queue[prevIndex];
             }
 
             if (prev == null) return;
 
-            musicfilesListView.SelectedItem = prev;
-            musicfilesListView.ScrollIntoView(prev);
-            PlayTrack(prev);
+            SelectInQueue(prev);
+            _ = PlayQueueTrackAsync(prev);
         }
 
         private void btnPlayPause_Click(object? sender, RoutedEventArgs e)
@@ -1141,6 +1254,8 @@ namespace musicPlayer
         /// <summary>停止播放并复位 UI（不切歌）。</summary>
         private void StopPlayback()
         {
+            playGeneration++;   // 停播也让在飞的解析作废（否则解析回来会把歌又播起来）
+
             // 先摘掉源再 Stop：媒体关闭后 Stop 不会引发 MediaEnded，
             // 避免误触发"播完自动切下一首"
             mediaPlayer.Source = null;
@@ -1164,6 +1279,25 @@ namespace musicPlayer
             }
 
             AdvanceToNext(manual: false);
+        }
+
+        /// <summary>
+        /// 打开媒体失败（S8 新增）：在线流最常见的失败是 403/Cookie 过期或地址带时效。
+        /// 在线曲目不自动跳歌——连环跳会让用户连失败原因都看不清，只提示一次。
+        /// </summary>
+        private void mediaPlayer_MediaFailed(object sender, ExceptionRoutedEventArgs e)
+        {
+            string reason = e.ErrorException?.Message ?? "未知原因";
+            App.LogCrash($"[播放] MediaFailed 「{currentTrack?.Title}」({(currentTrack?.IsOnline == true ? "在线" : "本地")}): {reason}");
+
+            if (currentTrack?.IsOnline == true)
+            {
+                ShowToast("在线播放失败：链接可能已失效，或该站点需要登录后播放", warning: true);
+                StopPlayback();
+                return;
+            }
+
+            HandlePlayFailure();
         }
 
         /// <summary>播放方式按钮：顺序 → 随机 → 单曲循环 三态循环。</summary>
@@ -2125,6 +2259,283 @@ namespace musicPlayer
         }
 
         /// <summary>
+        /// 在线试听自检（保留的测试代码，S8 对应）：<c>MP_ONLINE_PLAY_TEST=1/2</c>。
+        ///
+        /// mode 1（全自动，跑完自动退出）：用本地 http 夹具走完整条试听链路，断言 18 项——
+        /// 地址判定（直链/HLS/blob）、IdentityKey、详情页嗅探（含"自动点播放"那一枪）、
+        /// 解析器三条分支（嗅探成功/无详情页/流媒体）、在线队列构建（无链接条目被排除）、
+        /// 真播放（MediaOpened）、播放态与标题同步、歌词信息卡、内核静音（防双声）、
+        /// 队列前进/后退、播本地曲目后队列回落、顺序模式到末尾停止。
+        ///
+        /// mode 2（手动）：铺 4 条演示结果 + 一个演示站点，让你直接点行试听；
+        /// 本地 http 服务留着不关（进程退出即释放），文件在 %TEMP%\musicplayer_playtest\。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunPlaybackTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_PLAY_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(1500);   // 等主窗口就绪
+
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_playtest.log");
+            int pass = 0, fail = 0;
+            void Log(string s) { try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { } }
+            void Ok(string what) { pass++; Log($"  ✓ {what}"); }
+            void Bad(string what) { fail++; Log($"  ✗ {what}"); }
+
+            Services.PlaybackSelfTest.LocalHttpServer? server = null;
+            Services.PlaybackSelfTest.PlaybackFixtures? fx = null;
+            string originalLastTrack = "";
+            bool keepFixtures = false;     // mode 2 要留着服务给用户点播
+            bool originalMute = mediaPlayer.IsMuted;
+
+            // 播放方式必须锁定"顺序"：用户设置里可能是随机/单曲循环，
+            // 那样"下一首"是随机抽的、"播到末尾"也不会停，断言就变成看运气（踩过）。
+            PlayMode originalPlayMode = playMode;
+            playMode = PlayMode.Sequential;
+            UpdatePlayModeButton();
+            shuffleBag.Clear();
+
+            try
+            {
+                try { File.WriteAllText(logPath, ""); } catch { }
+                Log($"[{DateTime.Now:HH:mm:ss}] 在线试听自检（MP_ONLINE_PLAY_TEST={mode}）");
+
+                originalLastTrack = Db.GetLastTrackPath();
+
+                (server, fx) = Services.PlaybackSelfTest.PrepareFixtures();
+                Log($"夹具音频 = {fx.AudioFilePath}");
+                Log($"直链 = {fx.DirectUrl}");
+                Log($"详情页 = {fx.DetailUrl}");
+
+                // ── 手动模式：铺好界面就走人 ────────────────────────────────
+                if (mode == "2")
+                {
+                    keepFixtures = true;
+                    EnterOnlineView();
+                    long siteId = Services.OnlineSearchSelfTest.EnsureDemoSite("演示站·试听");
+
+                    var demo = Services.PlaybackSelfTest.CreateDemoResults(fx);
+                    OnlineResults.Clear();
+                    onlineTrackMap.Clear();
+                    foreach (var r in demo) OnlineResults.Add(r);
+
+                    onlineSearched = true;
+                    RefreshOnlineSites(siteId);
+                    txtOnlineStatus.Text = "演示结果 5 条：点一行试听（第 2 条要走动态嗅探）";
+                    UpdateOnlineEmptyState();
+                    ShowToast("测试：点任意一行试听；第 2 条会先解析播放地址");
+                    Log("手动模式：已铺 5 条演示结果，等服务退出");
+                    return;
+                }
+
+                mediaPlayer.IsMuted = true;   // 自检不出声（WAV 振幅也很低，双保险）
+
+                // ① 地址判定（纯函数）
+                var direct = OnlineSearchService.DecideForUrl("https://example.com/a.mp3");
+                if (direct.CanPlay) Ok("直链 mp3 → 可在线播放");
+                else Bad($"直链 mp3 应可播放，实际 reason={direct.Reason}");
+
+                var hls = OnlineSearchService.DecideForUrl("https://example.com/live/index.m3u8");
+                if (!hls.CanPlay && hls.IsStream && hls.Reason.Contains("下载"))
+                    Ok("m3u8 → 判为流媒体，提示下载后播放");
+                else Bad($"m3u8 判定异常：CanPlay={hls.CanPlay} IsStream={hls.IsStream}");
+
+                var blob = OnlineSearchService.DecideForUrl("blob:https://example.com/abcd");
+                if (!blob.CanPlay && blob.Reason.Contains("临时流")) Ok("blob: → 判为页面内部临时流");
+                else Bad($"blob 判定异常：{blob.Reason}");
+
+                // ② IdentityKey（队列定位靠它，不能拿 FullPath 比）
+                var demoResults = Services.PlaybackSelfTest.CreateDemoResults(fx);
+                var t1 = GetOrCreateOnlineTrack(demoResults[0]);
+                var t1Again = GetOrCreateOnlineTrack(demoResults[0]);
+                var t2 = GetOrCreateOnlineTrack(demoResults[1]);
+                bool localDiffers = new TrackItem { Title = "同名", FullPath = Path.Combine(Path.GetTempPath(), "a.mp3") }.IdentityKey
+                                    != new TrackItem { Title = "同名", FullPath = Path.Combine(Path.GetTempPath(), "b.mp3") }.IdentityKey;
+                if (ReferenceEquals(t1, t1Again) && t1.IdentityKey == t1Again.IdentityKey
+                    && t1.IdentityKey != t2.IdentityKey && localDiffers)
+                    Ok("IdentityKey：同结果复用同一对象、不同条目/不同文件互不相等");
+                else Bad("IdentityKey 判定异常");
+
+                // ③ 解析器第一层：详情页 DOM 里就有 <audio src> → 静态提取，秒出（不该等 6s 嗅探）
+                var staticResult = demoResults[4];
+                var swStatic = Stopwatch.StartNew();
+                var staticResolved = await OnlineSearchService.ResolveAudioAsync(staticResult);
+                swStatic.Stop();
+                if (staticResolved.CanPlay && !string.IsNullOrWhiteSpace(staticResult.AudioUrl)
+                    && swStatic.ElapsedMilliseconds < 4000)
+                    Ok($"静态提取命中（{swStatic.ElapsedMilliseconds} ms，{staticResult.AudioUrl}）");
+                else Bad($"静态提取异常：CanPlay={staticResolved.CanPlay} 耗时={swStatic.ElapsedMilliseconds}ms reason={staticResolved.Reason}");
+
+                // ④ 解析器第二层：音频地址点了播放才写入 → 动态嗅探（1.2s 后注入"自动点播放"）
+                var needSniff = demoResults[1];
+                var swSniff = Stopwatch.StartNew();
+                var resolved = await OnlineSearchService.ResolveAudioAsync(needSniff);
+                swSniff.Stop();
+                if (resolved.CanPlay && !string.IsNullOrWhiteSpace(needSniff.AudioUrl))
+                    Ok($"动态嗅探命中并回填（{swSniff.ElapsedMilliseconds} ms，{needSniff.AudioUrl}）");
+                else Bad($"动态嗅探异常：CanPlay={resolved.CanPlay} reason={resolved.Reason}；" +
+                         $"内核嗅探事件 {HiddenBrowserService.Instance.SniffEventCount} 个，最后 {HiddenBrowserService.Instance.LastSniffedUrl ?? "无"}");
+
+                // ④b 缓存：同一条结果再解析不该重新开页面
+                var swCache = Stopwatch.StartNew();
+                var cached = await OnlineSearchService.ResolveAudioAsync(needSniff);
+                swCache.Stop();
+                if (cached.CanPlay && swCache.ElapsedMilliseconds < 300)
+                    Ok($"二次解析走缓存（{swCache.ElapsedMilliseconds} ms）");
+                else Bad($"缓存未生效：{swCache.ElapsedMilliseconds} ms");
+
+                // ⑤ 解析器：无详情页 → 明确原因
+                var noLink = await OnlineSearchService.ResolveAudioAsync(demoResults[3]);
+                if (!noLink.CanPlay && noLink.Reason.Contains("详情页"))
+                    Ok("无详情页 → 明确提示无法解析");
+                else Bad($"无详情页判定异常：{noLink.Reason}");
+
+                // ⑥ 解析器：流媒体 → 不可试听但可下载
+                var streamOnly = await OnlineSearchService.ResolveAudioAsync(demoResults[2]);
+                if (!streamOnly.CanPlay && streamOnly.IsStream)
+                    Ok("流媒体结果 → 拒绝试听（地址留给 S9 下载）");
+                else Bad($"流媒体判定异常：CanPlay={streamOnly.CanPlay}");
+
+                // ⑦ 在线队列：5 条结果里"既无直链又无详情页"和"已知流媒体"的都不进队列
+                OnlineResults.Clear();
+                onlineTrackMap.Clear();
+                foreach (var r in demoResults) OnlineResults.Add(r);
+                BuildOnlineQueue();
+                if (onlineQueue.Count == 3) Ok("在线队列 3 条（无链接/流媒体条目被排除）");
+                else Bad($"在线队列应为 3 条，实际 {onlineQueue.Count}（{string.Join("、", onlineQueue.Select(t => t.Title))}）");
+
+                // ⑧ 真播放：MediaElement 打开 http 流并出声（测试已静音）
+                var playTrackItem = GetOrCreateOnlineTrack(demoResults[0]);
+                var opened = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnOpened(object? s, RoutedEventArgs e) => opened.TrySetResult(true);
+                mediaPlayer.MediaOpened += OnOpened;
+                PlayTrack(playTrackItem);
+                bool openedInTime = await Task.WhenAny(opened.Task, Task.Delay(5000)) == opened.Task;
+                mediaPlayer.MediaOpened -= OnOpened;
+
+                if (mediaPlayer.Source != null && openedInTime)
+                    Ok($"在线曲目真播放：MediaOpened 触发，时长 {(mediaPlayer.NaturalDuration.HasTimeSpan ? mediaPlayer.NaturalDuration.TimeSpan.TotalSeconds.ToString("0.0") + "s" : "未知")}");
+                else Bad($"在线播放未打开：Source={mediaPlayer.Source} opened={openedInTime}");
+
+                // ⑨ 播放态 UI 同步（与本地曲目同一套）
+                if (isPlaying && txtWindowTitle.Text == playTrackItem.Title && Title.Contains("在线"))
+                    Ok("播放态/标题同步（在线标识就位）");
+                else Bad($"播放态异常：isPlaying={isPlaying} 标题={txtWindowTitle.Text} 窗口={Title}");
+
+                // ⑩ 歌词区：没有 .lrc → 显示曲目信息卡
+                bool infoCard = CurrentLyrics.Count == 0
+                                && LyricsPanel.Children.Count == 1
+                                && LyricsPanel.Children[0] is StackPanel card && card.Children.Count >= 2;
+                if (infoCard) Ok("在线曲目的歌词区显示信息卡（浏览器无 .lrc 时不显示「暂无歌词」）");
+                else Bad($"信息卡异常：歌词行={CurrentLyrics.Count} 子元素={LyricsPanel.Children.Count}");
+
+                // ⑪ 防双声：内核必须静音
+                bool muted = HiddenBrowserService.Instance.EnsureMutedCore()
+                             && HiddenBrowserService.Instance.IsMutedCore;
+                if (muted) Ok("隐藏内核静音确认（页面里的 <audio> 不会和我们一起响）");
+                else Bad("隐藏内核未静音，存在双声风险");
+
+                // ⑫ 下一首：在**在线队列**内前进
+                AdvanceToNext(manual: true);
+                await System.Threading.Tasks.Task.Delay(400);
+                var second = GetOrCreateOnlineTrack(demoResults[1]);
+                if (currentTrack != null && currentTrack.IdentityKey == second.IdentityKey)
+                    Ok("下一首在在线队列内前进（第 2 条，地址已解析）");
+                else Bad($"下一首异常：当前={currentTrack?.Title}");
+
+                // ⑬ 上一首：回到第 1 条
+                btnPrevious_Click(null, new RoutedEventArgs());
+                await System.Threading.Tasks.Task.Delay(400);
+                if (currentTrack != null && currentTrack.IdentityKey == playTrackItem.IdentityKey)
+                    Ok("上一首回到队列上一条");
+                else Bad($"上一首异常：当前={currentTrack?.Title}");
+
+                // ⑭ 混排：播本地曲目 → 队列回落到本地可见列表
+                var localTrack = new TrackItem { Title = "本地测试曲", FullPath = fx.AudioFilePath };
+                PlayTrack(localTrack);
+                if (onlineQueue.Count == 0 && ReferenceEquals(PlayQueue, VisibleTracks))
+                    Ok("播本地曲目 → 在线队列清空，next/prev 回到本地列表");
+                else Bad($"队列回落异常：onlineQueue={onlineQueue.Count}");
+
+                // ⑮ 流媒体结果拒绝试听（StreamUrl 保持为空）
+                var streamTrack = GetOrCreateOnlineTrack(demoResults[2]);
+                bool streamPlayable = await ResolveOnlineTrackAsync(streamTrack);
+                if (!streamPlayable && string.IsNullOrEmpty(streamTrack.StreamUrl))
+                    Ok("流媒体结果点试听被拒绝（提示下载后播放）");
+                else Bad($"流媒体试听应被拒绝：playable={streamPlayable} stream={streamTrack.StreamUrl}");
+
+                // ⑯ 顺序模式：播到队列末尾即停止
+                OnlineResults.Clear();
+                OnlineResults.Add(demoResults[0]);
+                BuildOnlineQueue();
+                PlayTrack(onlineQueue[0]);
+                AdvanceToNext(manual: false);
+                if (!isPlaying && mediaPlayer.Source == null) Ok("顺序模式播到末尾停止（不越界、不回环）");
+                else Bad($"末尾停止异常：isPlaying={isPlaying} Source={mediaPlayer.Source}");
+
+                // ⑰ 停止播放后 UI 复位
+                StopPlayback();
+                if (!isPlaying && btnPlayPause.Content?.ToString() == "▶️") Ok("停止播放后按钮/状态复位");
+                else Bad($"停止后 UI 异常：isPlaying={isPlaying} 按钮={btnPlayPause.Content}");
+
+                // ⑱ 本地曲目仍可正常播放（改动没有把老路径弄坏）
+                var opened2 = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnOpened2(object? s, RoutedEventArgs e) => opened2.TrySetResult(true);
+                mediaPlayer.MediaOpened += OnOpened2;
+                PlayTrack(new TrackItem { Title = "本地测试曲2", FullPath = fx.AudioFilePath });
+                bool localOk = await Task.WhenAny(opened2.Task, Task.Delay(5000)) == opened2.Task;
+                mediaPlayer.MediaOpened -= OnOpened2;
+                if (localOk) Ok("本地曲目播放不受影响（回归）");
+                else Bad("本地曲目播放失败（回归项）");
+
+                Log($"\n结果：{pass} 通过 / {fail} 失败");
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {fail == 0}");
+
+                ShowToast(fail == 0 ? "在线试听自检：全部通过" : "在线试听自检：存在失败项，详见日志",
+                    warning: fail != 0);
+
+                await System.Threading.Tasks.Task.Delay(1200);
+                Application.Current?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("在线试听自检异常，详见 %TEMP%\\musicplayer_playtest.log", warning: true);
+            }
+            finally
+            {
+                // 清理：先停播（http 服务还在），再恢复设置、关服务
+                try
+                {
+                    if (!keepFixtures)
+                    {
+                        StopPlayback();
+                        currentTrack = null;
+                        mediaPlayer.IsMuted = originalMute;
+
+                        OnlineResults.Clear();
+                        onlineTrackMap.Clear();
+                        onlineQueue.Clear();
+                        shuffleBag.Clear();
+                        onlineSearched = false;
+                        if (originalLastTrack.Length > 0) Db.SetLastTrackPath(originalLastTrack);
+
+                        HiddenBrowserService.Instance.StopLoading();
+                        server?.Dispose();
+
+                        playMode = originalPlayMode;
+                        UpdatePlayModeButton();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("清理异常（忽略）: " + ex.Message);
+                }
+            }
+        }
+
+        /// <summary>
         /// 应用内轻提示：主区顶部居中淡入，停留约 2.4 秒后淡出。
         /// 替代系统 MessageBox 弹窗（信息/警告类）；需要用户做选择的确认框仍用弹窗。
         /// </summary>
@@ -2455,6 +2866,10 @@ namespace musicPlayer
             }
 
             onlineSearched = true;
+
+            // 新一轮搜索：上一次的播放地址解析立刻停掉（内核要让给搜索），结果缓存一并作废
+            onlinePlayCts?.Cancel();
+            onlineTrackMap.Clear();
             OnlineResults.Clear();
             ApplyOnlineGrouping(sites.Count > 1);
             StartOnlineBusy();
@@ -2588,19 +3003,303 @@ namespace musicPlayer
             onlineResultsList.ScrollIntoView(onlineResultsList.SelectedItem);
         }
 
-        /// <summary>试听入口（S8 接入播放；现在给出明确提示，不做假动作）。</summary>
-        private void PlayOnlineSelected()
+        /// <summary>试听入口（S8）：单击结果 / 回车 / 双击都走这里。</summary>
+        /// <param name="target">点中/选中的结果；null 表示用列表当前选中项。</param>
+        private async void PlayOnlineSelected(OnlineResult? target = null)
         {
-            if (onlineResultsList.SelectedItem is not OnlineResult r)
+            var r = target ?? onlineResultsList.SelectedItem as OnlineResult;
+            if (r == null)
             {
                 ShowToast("先选一条结果");
                 return;
             }
-            ShowToast($"试听「{r.Title}」将在 S8 接入");
+
+            // 内核只有一个标签页：搜索/解析同时跑会互相顶掉页面
+            if (isOnlineSearching)
+            {
+                ShowToast("搜索还在进行，完成后再试听");
+                return;
+            }
+            if (isResolvingOnlineAudio)
+            {
+                ShowToast("正在解析上一条的播放地址，稍等");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(r.DetailUrl) && string.IsNullOrWhiteSpace(r.AudioUrl))
+            {
+                ShowToast("这条结果没有详情页链接，无法在线试听", warning: true);
+                return;
+            }
+
+            // 队列：把当前结果列表里有播放可能的条目全部转成"在线 TrackItem"，
+            // 之后的上一首/下一首/随机/播完自动切就在这份队列里走（与本地队列同一套代码）
+            BuildOnlineQueue();
+            var track = GetOrCreateOnlineTrack(r);
+            SelectInQueue(track);
+
+            isResolvingOnlineAudio = true;
+            onlinePlayCts?.Dispose();
+            onlinePlayCts = new CancellationTokenSource();
+            string statusBackup = txtOnlineStatus.Text;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(track.StreamUrl))
+                {
+                    txtOnlineStatus.Text = $"正在解析「{r.Title}」的播放地址…";
+                    if (!await ResolveOnlineTrackAsync(track, onlinePlayCts.Token)) return;
+                }
+                PlayTrack(track);
+            }
+            finally
+            {
+                isResolvingOnlineAudio = false;
+                // 状态行别卡在"正在解析…"：恢复成结果条数那类信息
+                if (txtOnlineStatus.Text.StartsWith("正在解析", StringComparison.Ordinal))
+                    txtOnlineStatus.Text = statusBackup;
+            }
         }
 
-        private void onlineResultsList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-            => PlayOnlineSelected();
+        /// <summary>
+        /// 解析一条在线曲目的播放地址并写回 <paramref name="track"/>。
+        /// 失败/只有流媒体时已经弹过 Toast，返回 false（调用方不用再提示）。
+        /// </summary>
+        private async System.Threading.Tasks.Task<bool> ResolveOnlineTrackAsync(TrackItem track,
+            CancellationToken ct = default)
+        {
+            if (track.OnlineSource is not { } r)
+            {
+                ShowToast("这条在线曲目缺少来源信息，无法播放", warning: true);
+                return false;
+            }
+
+            AudioResolveResult resolved;
+            try
+            {
+                resolved = await OnlineSearchService.ResolveAudioAsync(r, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;   // 用户取消/换了一条，静默处理
+            }
+            catch (Exception ex)
+            {
+                App.LogCrash("[播放] 解析在线地址异常: " + ex);
+                ShowToast("解析播放地址失败：" + ex.Message, warning: true);
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(resolved.Url))
+            {
+                ShowToast(resolved.Reason.Length > 0 ? resolved.Reason : "无法在线播放这条结果", warning: true);
+                return false;
+            }
+
+            if (resolved.IsStream)
+            {
+                // HLS/DASH：MediaElement 播不了，但地址对 S9 下载有用，留在 result.AudioUrl 里
+                r.AudioUrl = resolved.Url;
+                ShowToast(resolved.Reason, warning: true);
+                return false;
+            }
+
+            track.StreamUrl = resolved.Url;
+            return true;
+        }
+
+        /// <summary>结果 → 在线曲目的缓存（同一条结果反复点：复用同一个 TrackItem 与已解析地址）。</summary>
+        private readonly Dictionary<OnlineResult, TrackItem> onlineTrackMap = new();
+
+        /// <summary>把一条搜索结果包成"在线曲目"（不落库、不落盘，只是播放队列里的一条）。</summary>
+        private TrackItem GetOrCreateOnlineTrack(OnlineResult r)
+        {
+            if (!onlineTrackMap.TryGetValue(r, out var track))
+            {
+                track = new TrackItem
+                {
+                    Title = string.IsNullOrWhiteSpace(r.Artist) ? r.Title : $"{r.Title} - {r.Artist}",
+                    IsOnline = true,
+                    Source = "online",
+                    SourceUrl = r.DetailUrl,
+                    OnlineSource = r,
+                    Format = "stream",
+                    Duration = r.Duration
+                };
+                onlineTrackMap[r] = track;
+            }
+
+            // 地址可能在别处刚解析好（S9 下载前也会解析），保持同步——
+            // 但只有"MediaElement 能直接播"的地址才写进来：m3u8/mpd 是下载用的索引，
+            // 塞给播放器只会立刻报错。
+            if (!string.IsNullOrWhiteSpace(r.AudioUrl))
+            {
+                var decision = OnlineSearchService.DecideForUrl(r.AudioUrl!);
+                if (decision.CanPlay) track.StreamUrl = decision.Url;
+            }
+            return track;
+        }
+
+        /// <summary>
+        /// 用当前结果列表重建在线播放队列：**有播放可能**的条目才进队列——
+        /// 既无直链又无详情页的、以及已知是 HLS/DASH 流媒体的，都不参与"下一首"轮转
+        /// （后者列表里仍能看到、也能下载，只是试听不了）。
+        /// </summary>
+        private void BuildOnlineQueue()
+        {
+            onlineQueue.Clear();
+            foreach (var r in OnlineResults)
+            {
+                bool hasDirect = !string.IsNullOrWhiteSpace(r.AudioUrl);
+                bool hasDetail = !string.IsNullOrWhiteSpace(r.DetailUrl);
+                if (!hasDirect && !hasDetail) continue;
+                if (hasDirect && !OnlineSearchService.DecideForUrl(r.AudioUrl!).CanPlay) continue;
+
+                onlineQueue.Add(GetOrCreateOnlineTrack(r));
+            }
+            shuffleBag.Clear();     // 队列换了，随机池作废
+        }
+
+        /// <summary>正在解析播放地址（同一时刻只解析一条）。</summary>
+        private bool isResolvingOnlineAudio;
+        private CancellationTokenSource? onlinePlayCts;
+
+        /// <summary>
+        /// 在线曲目的"歌词区"：没有 .lrc 可找，改显示曲目信息卡
+        /// （标题 / 来源站 / 原链接，PRD F5.3），桌面歌词同步显示两行文字。
+        /// </summary>
+        private void ShowOnlineTrackInfoCard(TrackItem track)
+        {
+            // 清空歌词状态：CheckAndUpdateLyrics 见到空列表就直接空转，不会误高亮
+            CurrentLyrics = new List<LyricLine>();
+            CurrentLyricIndex = -1;
+            LyricsScrollViewer.ScrollToTop();
+            LyricsPanel.Children.Clear();
+
+            string site = track.OnlineSource?.SiteName ?? "";
+            string link = track.OnlineSource?.DetailUrl ?? "";
+
+            var card = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                MaxWidth = 560
+            };
+
+            card.Children.Add(new TextBlock
+            {
+                Text = "在线试听 · 未下载",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xD7, 0x00)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 10)
+            });
+
+            card.Children.Add(new TextBlock
+            {
+                Text = track.Title,
+                FontSize = 26,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xF2, 0xF2, 0xF2)),
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            });
+
+            if (site.Length > 0)
+            {
+                card.Children.Add(new TextBlock
+                {
+                    Text = $"来源：{site}",
+                    FontSize = 12,
+                    Foreground = new SolidColorBrush(Color.FromRgb(0xAA, 0xAA, 0xAA)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 10, 0, 0)
+                });
+            }
+
+            if (link.Length > 0)
+            {
+                var linkRow = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 16, 0, 0)
+                };
+
+                linkRow.Children.Add(new TextBlock
+                {
+                    Text = link,
+                    FontSize = 11,
+                    MaxWidth = 360,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    Foreground = new SolidColorBrush(Color.FromArgb(0x77, 0xFF, 0xFF, 0xFF)),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    ToolTip = link
+                });
+
+                var copy = new Button
+                {
+                    Content = "复制链接",
+                    Tag = link,
+                    Style = (Style)FindResource("GhostButton"),
+                    FontSize = 11,
+                    Padding = new Thickness(8, 3, 8, 3),
+                    Margin = new Thickness(8, 0, 0, 0),
+                    Cursor = System.Windows.Input.Cursors.Hand
+                };
+                copy.Click += btnCopyOnlineLink_Click;
+
+                linkRow.Children.Add(copy);
+                card.Children.Add(linkRow);
+            }
+
+            LyricsPanel.Children.Add(card);
+
+            // 桌面歌词：没有时间轴，就显示标题 + 来源两行
+            lyricsDesktopWindow?.LoadLyrics(new List<LyricLine>
+            {
+                new() { Text = track.Title },
+                new() { Text = site.Length > 0 ? $"在线试听 · {site}" : "在线试听" }
+            });
+        }
+
+        /// <summary>复制在线曲目的原链接（信息卡上的按钮）。</summary>
+        private void btnCopyOnlineLink_Click(object? sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.Tag is not string url || url.Length == 0) return;
+            try
+            {
+                Clipboard.SetText(url);
+                ShowToast("已复制原链接");
+            }
+            catch (Exception ex)
+            {
+                ShowToast("复制失败：" + ex.Message, warning: true);
+            }
+        }
+
+        /// <summary>
+        /// 单击结果行试听（S8）：点下载按钮不算（按钮自己处理点击），点空白处也不算。
+        /// </summary>
+        private void onlineResultsList_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            // 从点击源向上找 Button：行内的下载按钮不能触发试听
+            for (var node = e.OriginalSource as DependencyObject; node != null;
+                 node = VisualTreeHelper.GetParent(node))
+            {
+                if (node is Button) return;
+                if (node is ListView) break;
+            }
+
+            var container = ItemsControl.ContainerFromElement(onlineResultsList,
+                e.OriginalSource as DependencyObject) as ListViewItem;
+            if (container?.DataContext is not OnlineResult r) return;
+
+            onlineResultsList.SelectedItem = r;
+            PlayOnlineSelected(r);
+        }
 
         /// <summary>行内下载按钮（S9 接入下载队列；三态样式已就位）。</summary>
         private void btnOnlineDownload_Click(object sender, RoutedEventArgs e)

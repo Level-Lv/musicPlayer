@@ -143,6 +143,35 @@ namespace musicPlayer.Data
         /// <summary>在线来源页地址（仅 Source = online 时有值）。</summary>
         public string? SourceUrl { get; set; }
 
+        // ── 在线试听（S8）───────────────────────────────────────────────
+        // 在线曲目只是"播放队列里的一条"，不入库、不落盘：媒体地址直接从网络流式拉取。
+
+        /// <summary>
+        /// 是否在线曲目。为 true 时<b>没有本地文件</b>：FullPath 为空，
+        /// 播放源取 <see cref="StreamUrl"/>，歌词区显示曲目信息卡而非 .lrc。
+        /// </summary>
+        public bool IsOnline { get; set; }
+
+        /// <summary>在线曲目的媒体地址（直链，或下载阶段的流媒体索引地址）。</summary>
+        public string? StreamUrl { get; set; }
+
+        /// <summary>
+        /// 在线曲目对应的搜索结果对象（播放队列里的回指）：
+        /// 用来回显列表选中、二次播放时复用已解析地址、S9 下载时复用同一份元数据。
+        /// </summary>
+        public OnlineResult? OnlineSource { get; set; }
+
+        /// <summary>实际播放源：本地取文件路径，在线取流地址。</summary>
+        public string PlayUrl => IsOnline ? StreamUrl ?? "" : FullPath;
+
+        /// <summary>
+        /// 同一曲目的比较键。本地按文件路径，在线按结果条目（没有路径可比值——用地址 + 标题兜底）。
+        /// 队列的"当前曲目定位 / 随机池去重"都靠它，避免在线条目因 FullPath 为空而互相误判成同一首。
+        /// </summary>
+        public string IdentityKey => IsOnline
+            ? $"online:{OnlineSource?.DetailUrl ?? ""}|{StreamUrl ?? ""}|{Title}"
+            : $"local:{FullPath}";
+
         public event PropertyChangedEventHandler? PropertyChanged;
 
         protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)

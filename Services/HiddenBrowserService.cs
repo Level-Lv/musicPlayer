@@ -576,6 +576,10 @@ namespace musicPlayer.Services
         private void RaiseAudioSniffed(string url, string? contentType, bool isStream)
         {
             if (_isVisibleOnHost) return; // 验证/向导模式下不嗅探（用户手动浏览页面，噪音大）
+
+            SniffEventCount++;
+            LastSniffedUrl = url;
+
             AudioSniffed?.Invoke(this, new AudioSniffedEventArgs
             {
                 Url = url,
@@ -583,6 +587,114 @@ namespace musicPlayer.Services
                 IsStream = isStream
             });
         }
+
+        /// <summary>累计收到的音频嗅探事件数（诊断/自检用：0 说明内核连音频请求都没发出）。</summary>
+        public int SniffEventCount { get; private set; }
+
+        /// <summary>最近一次嗅探到的地址（诊断/自检用）。</summary>
+        public string? LastSniffedUrl { get; private set; }
+
+        /// <summary>
+        /// **只等不导**：在当前已打开的页面上等待音频请求命中（上限 <paramref name="timeout"/>），
+        /// 可选在 1.2 秒后注入 kick 脚本"点一下播放"。
+        ///
+        /// 导航由调用方先用 <see cref="NavigateAsync"/> 完成——这样能先做 DOM 静态提取，
+        /// 只有"必须点了播放才去请求音频"的站点才走到这里。
+        ///
+        /// ⚠ 两个实测坑：
+        /// 1. 隐藏内核里页面是 hidden 状态，Chromium 会把媒体加载往后推（实测 play() 后约 6s 才发请求），
+        ///    所以等待期间把 controller 临时置为可见——宿主窗口在屏幕外(-32000)，用户什么都看不到；
+        /// 2. kick 脚本必须在 UI 线程执行（见 <see cref="KickAfterDelay"/>）。
+        /// </summary>
+        public Task<AudioSniffedEventArgs?> WaitForAudioAsync(TimeSpan timeout, string? kickScript = null,
+            CancellationToken ct = default) =>
+            RunAsync(async core =>
+            {
+                var tcs = new TaskCompletionSource<AudioSniffedEventArgs?>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                AudioSniffedEventArgs? streamFallback = null;
+
+                void OnSniffed(object? s, AudioSniffedEventArgs e)
+                {
+                    if (e.IsStream) { streamFallback ??= e; return; }   // 先记下，继续等直链
+                    tcs.TrySetResult(e);
+                }
+
+                AudioSniffed += OnSniffed;
+                bool wasVisible = _controller!.IsVisible;
+                try
+                {
+                    _controller.IsVisible = true;    // 解除后台节流（宿主在屏幕外，不可见）
+
+                    if (!string.IsNullOrWhiteSpace(kickScript))
+                        KickAfterDelay(core, kickScript, ct);
+
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    timeoutCts.CancelAfter(timeout);
+                    using (timeoutCts.Token.Register(() =>
+                           {
+                               if (ct.IsCancellationRequested) { try { core.Stop(); } catch { } }
+                               tcs.TrySetResult(null);                 // 超时 = 没等着
+                           }))
+                    {
+                        var hit = await tcs.Task;
+                        App.LogCrash(hit == null
+                            ? $"[嗅探] 超时未命中（页面 {core.Source}）"
+                            : $"[嗅探] 命中 {(hit.IsStream ? "流媒体" : "直链")} {hit.Url}");
+                        return hit ?? streamFallback;
+                    }
+                }
+                finally
+                {
+                    AudioSniffed -= OnSniffed;
+                    try { _controller!.IsVisible = wasVisible; } catch { }
+                }
+            }, ct);
+
+        /// <summary>
+        /// 延迟 1.2 秒后注入"自动播放"脚本（嗅探辅助，异常一律吞掉）。
+        /// ⚠ 必须在 UI 线程调用 WebView2：`Task.Delay(...).ConfigureAwait(false)` 之后
+        /// 直接 ExecuteScriptAsync 会抛"线程不对"，脚本静默失败——这个坑实测踩过一次。
+        /// </summary>
+        private static void KickAfterDelay(CoreWebView2 core, string script, CancellationToken ct)
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null) return;
+
+            _ = Task.Delay(1200, ct).ContinueWith(_ =>
+            {
+                dispatcher.BeginInvoke(new Action(async () =>
+                {
+                    try { await core.ExecuteScriptAsync(script); }
+                    catch (Exception ex) { Debug.WriteLine($"[嗅探] 自动播放脚本失败（忽略）: {ex.Message}"); }
+                }));
+            }, CancellationToken.None, TaskContinuationOptions.NotOnCanceled,
+                TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// 防双声断言（S8）：播放前确认隐藏内核仍然静音——页面里被 kick 脚本"点醒"的
+        /// &lt;audio&gt; 若没被内核静音，就会和 MediaElement 一起响。
+        /// 返回当前是否静音（内核未初始化视为安全）。
+        /// </summary>
+        public bool EnsureMutedCore()
+        {
+            var core = CoreWebView2;
+            if (!_initialized || core == null) return true;
+            try
+            {
+                if (!core.IsMuted) core.IsMuted = true;
+                return core.IsMuted;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[内核] 检查静音失败: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>当前内核是否静音（诊断/自检用；未初始化返回 true）。</summary>
+        public bool IsMutedCore => !_initialized || _controller?.CoreWebView2 is not { } core || core.IsMuted;
 
         #endregion
 

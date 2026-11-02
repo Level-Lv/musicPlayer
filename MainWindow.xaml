@@ -1186,7 +1186,7 @@
                             SelectionMode="Single"
                             ItemContainerStyle="{StaticResource OnlineListItem}"
                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                            MouseDoubleClick="onlineResultsList_MouseDoubleClick">
+                            MouseLeftButtonUp="onlineResultsList_MouseLeftButtonUp">
 
                             <ListView.ItemTemplate>
                                 <DataTemplate>
@@ -1440,6 +1440,7 @@
             LoadedBehavior="Manual"
             Visibility="Collapsed"
             MediaEnded="mediaPlayer_MediaEnded"
+            MediaFailed="mediaPlayer_MediaFailed"
             MediaOpened="mediaPlayer_MediaOpened"/>
     </Grid>
 </Window>
