@@ -797,6 +797,57 @@
                     </StackPanel>
                 </Border>
 
+                <!-- ============ 4.7 在线下载 ============ -->
+                <Border Background="#16141420" BorderBrush="#1FFFFFFF" BorderThickness="1"
+                        CornerRadius="14" Padding="18,16" Margin="0,14,0,0">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <Border Style="{StaticResource SectionIcon}">
+                                <TextBlock Text="⬇" FontSize="14" Foreground="#FFD700"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Text="在线下载" Style="{StaticResource SectionTitle}"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- 下载目录：在线歌曲下载后的保存位置 -->
+                        <TextBlock Text="在线歌曲的保存位置（改名只影响之后的新任务，正在下载的任务不受影响）"
+                                   Foreground="#77AAAAAA" FontSize="11" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="txtDownloadFolder" IsReadOnly="True"
+                                     Style="{StaticResource PathBox}" Margin="0,0,8,0"/>
+                            <Button Grid.Column="1" Content="选择…" Click="btnPickDownloadFolder_Click"
+                                    Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+                            <Button Grid.Column="2" Content="打开" Click="btnOpenDownloadFolder_Click"
+                                    Style="{StaticResource GhostButton}" Margin="0,0,8,0"/>
+                            <Button Grid.Column="3" Content="恢复默认" Click="btnResetDownloadFolder_Click"
+                                    Style="{StaticResource DangerButton}"/>
+                        </Grid>
+
+                        <!-- 空闲回收：隐藏内核的内存策略 -->
+                        <TextBlock Text="隐藏内核（在线搜索/试听的浏览器）空闲后的处理方式"
+                                   Foreground="#77AAAAAA" FontSize="11" Margin="0,14,0,0"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <RadioButton x:Name="rbIdleRecycle" GroupName="IdleRecycle"
+                                         Content="空闲 60 秒自动释放（省内存，下次搜索慢 1~2 秒）"
+                                         Style="{StaticResource ModernRadio}"
+                                         ToolTip="空闲超时后退出后台的浏览器进程，内存归零；再次在线搜索时自动重启"
+                                         Checked="IdleRecycle_Changed"/>
+                            <RadioButton x:Name="rbIdleKeep" GroupName="IdleRecycle"
+                                         Content="常驻后台（搜索快，但约占 100~200 MB 内存）"
+                                         Style="{StaticResource ModernRadio}"
+                                         Checked="IdleRecycle_Changed"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
                 <!-- ============ 5. 主题 + 快捷键 ============ -->
                 <Border Background="#16141420" BorderBrush="#1FFFFFFF" BorderThickness="1"
                         CornerRadius="14" Padding="18,16" Margin="0,14,0,0">

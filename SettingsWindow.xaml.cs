@@ -86,6 +86,14 @@ namespace musicPlayer
             // 数据库位置
             txtDbPath.Text = Db.DbPath;
 
+            // 在线下载目录（空 = 默认目录）
+            txtDownloadFolder.Text = DownloadService.GetDownloadDirectory();
+
+            // 隐藏内核空闲回收（S10 设置项；诊断窗口的内核状态行也依赖这一开关）
+            bool idleRecycle = Db.GetSetting("online_idle_recycle", "1") == "1";
+            rbIdleRecycle.IsChecked = idleRecycle;
+            rbIdleKeep.IsChecked = !idleRecycle;
+
             RefreshOnlineState();
         }
 
@@ -325,6 +333,61 @@ namespace musicPlayer
             if (!IsLoaded) return;
 
             Db.SetSetting("close_action", rbCloseExit.IsChecked == true ? "exit" : "tray");
+        }
+
+        // =====================================================================
+        // 4.5 在线下载（S10）
+        // =====================================================================
+
+        /// <summary>选下载目录：写库即时生效（GetDownloadDirectory 每次都现读设置）。</summary>
+        private void btnPickDownloadFolder_Click(object sender, RoutedEventArgs e)
+        {
+            using var dialog = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "选择在线歌曲的保存文件夹",
+                ShowNewFolderButton = true
+            };
+            if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+
+            Db.SetSetting("online_download_dir", dialog.SelectedPath);
+            txtDownloadFolder.Text = dialog.SelectedPath;
+        }
+
+        /// <summary>在资源管理器里打开下载目录（不存在就先建，和下载时的行为一致）。</summary>
+        private void btnOpenDownloadFolder_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string dir = DownloadService.GetDownloadDirectory();
+                System.IO.Directory.CreateDirectory(dir);
+                System.Diagnostics.Process.Start(
+                    new System.Diagnostics.ProcessStartInfo { FileName = dir, UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "打开文件夹失败：" + ex.Message, "在线下载",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        /// <summary>恢复默认目录：清空设置项即可（空 = GetDownloadDirectory 回落默认）。</summary>
+        private void btnResetDownloadFolder_Click(object sender, RoutedEventArgs e)
+        {
+            if (!ConfirmDialog.Confirm(this, "恢复默认下载目录",
+                "确定恢复默认下载目录吗？\n已下载到原位置的歌曲文件不会移动，只是之后的下载存到默认位置。",
+                "恢复默认", danger: false))
+                return;
+
+            Db.SetSetting("online_download_dir", "");
+            txtDownloadFolder.Text = DownloadService.GetDownloadDirectory();
+        }
+
+        /// <summary>空闲回收开关：写库即时生效（内核空闲计时每秒现读设置，不用重启）。</summary>
+        private void IdleRecycle_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return; // LoadSettingsToUi 勾选时会触发一次，别把初始值写坏
+
+            Db.SetSetting("online_idle_recycle", rbIdleRecycle.IsChecked == true ? "1" : "0");
         }
 
         // =====================================================================

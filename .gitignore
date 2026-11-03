@@ -368,4 +368,5 @@ Assets/ffmpeg/*.exe
 # 忽略开发用的文档和记忆文件
 *.md
 !/README.md
+!/全链路验收清单.md
 .workbuddy/

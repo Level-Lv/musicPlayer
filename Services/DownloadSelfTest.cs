@@ -322,7 +322,9 @@ namespace musicPlayer.Services
                 // 临时目录不该有残留
                 string tempDir = Path.Combine(Path.GetTempPath(), "musicplayer_downloads");
                 Check("临时目录无残留", !Directory.EnumerateFiles(tempDir).Any(),
-                    Directory.Exists(tempDir) ? "有文件" : "空");
+                    Directory.Exists(tempDir)
+                        ? $"{Directory.EnumerateFiles(tempDir).Count()} 个文件"
+                        : "目录不存在");
 
                 log($"\n结果：{pass} 通过 / {fail} 失败");
                 return fail == 0;

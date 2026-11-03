@@ -141,6 +141,9 @@ namespace musicPlayer
             // 下载与入库自检入口（S9，保留）：MP_ONLINE_DOWNLOAD_TEST=1/2，见方法注释
             _ = RunDownloadTestIfRequestedAsync();
 
+            // 设置项自检入口（S10，保留）：MP_ONLINE_SETTINGS_TEST=1，见方法注释
+            _ = RunSettingsTestIfRequestedAsync();
+
             // 站点状态自愈（S7）：搜索把站点标成 need_login/broken 时，就地提示 + 同步内存状态
             OnlineSearchService.SiteStatusChanged += OnOnlineSiteStatusChanged;
 
@@ -2377,6 +2380,46 @@ namespace musicPlayer
             {
                 Log("异常: " + ex);
                 ShowToast("下载自检异常，详见 %TEMP%\\musicplayer_downloadtest.log", warning: true);
+            }
+        }
+
+        /// <summary>
+        /// 设置项自检入口（保留的测试代码，S10 对应）：<c>MP_ONLINE_SETTINGS_TEST=1</c>。
+        /// 全自动（跑完自动退出）：纯逻辑验证下载目录解析与空闲回收开关的读写——
+        /// 默认目录取值、设置后生效并自动建目录、目录不可用回落默认、清空回落默认、
+        /// 落盘路径跟随目录解析、online_idle_recycle 写读一致；测试前后保留用户原设置。
+        /// 结果逐行落盘 %TEMP%\musicplayer_settingstest.log。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunSettingsTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_SETTINGS_TEST") ?? "";
+            if (mode != "1") return;
+
+            await System.Threading.Tasks.Task.Delay(1500);   // 等主窗口与数据库就绪
+
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_settingstest.log");
+            void Log(string s)
+            {
+                try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { }
+            }
+
+            try
+            {
+                try { File.WriteAllText(logPath, ""); } catch { }
+                Log($"[{DateTime.Now:HH:mm:ss}] 设置项自检（MP_ONLINE_SETTINGS_TEST={mode}）");
+
+                bool ok = await Services.SettingsSelfTest.RunAsync(Log);
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {ok}");
+                ShowToast(ok ? "设置自检：全部通过" : "设置自检：存在失败项，详见日志",
+                    warning: !ok);
+
+                await System.Threading.Tasks.Task.Delay(1200);
+                Application.Current?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("设置自检异常，详见 %TEMP%\\musicplayer_settingstest.log", warning: true);
             }
         }
 

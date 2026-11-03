@@ -554,8 +554,26 @@ namespace musicPlayer.Services
             if (!string.IsNullOrWhiteSpace(testDir)) return testDir;
 
             string dir = Db.GetSetting("online_download_dir", "");
-            if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir)) return dir;
+            if (!string.IsNullOrWhiteSpace(dir))
+            {
+                // 用户在设置里选过的目录：不存在就自动建（U 盘/移动硬盘暂时没插的情况，
+                // 目录建在盘符下会失败 → 记日志后回落默认目录，绝不因目录问题让下载挂掉）
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                    return dir;
+                }
+                catch (Exception ex)
+                {
+                    App.LogCrash($"[下载] 设置的下载目录不可用：{dir}（{ex.Message}），本次回落默认目录");
+                }
+            }
+            return GetDefaultDownloadDirectory();
+        }
 
+        /// <summary>默认下载目录（设置里"恢复默认"也回到这里）。</summary>
+        public static string GetDefaultDownloadDirectory()
+        {
             string myMusic = Environment.GetFolderPath(Environment.SpecialFolder.MyMusic);
             if (string.IsNullOrWhiteSpace(myMusic)) myMusic = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             return Path.Combine(myMusic, "MusicPlayer", "在线下载");

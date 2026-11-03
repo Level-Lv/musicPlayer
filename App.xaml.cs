@@ -27,7 +27,8 @@ namespace musicPlayer
         /// 隔离后测试至少能跑；正常使用时的单实例行为完全不变。
         /// </summary>
         private static bool IsTestRun =>
-            Environment.GetEnvironmentVariable("MP_ONLINE_DOWNLOAD_TEST") is { Length: > 0 }
+            Environment.GetEnvironmentVariable("MP_ONLINE_SETTINGS_TEST") is { Length: > 0 }
+            || Environment.GetEnvironmentVariable("MP_ONLINE_DOWNLOAD_TEST") is { Length: > 0 }
             || Environment.GetEnvironmentVariable("MP_ONLINE_UI_TEST") is { Length: > 0 }
             || Environment.GetEnvironmentVariable("MP_ONLINE_PLAY_TEST") is { Length: > 0 }
             || Environment.GetEnvironmentVariable("MP_ONLINE_MANAGER_TEST") is { Length: > 0 }
@@ -141,6 +142,7 @@ namespace musicPlayer
             // 优先级从高到低（同时开多个时，前面那个生效）
             string[] entries =
             {
+                "MP_ONLINE_SETTINGS_TEST", // S10 设置与验收
                 "MP_ONLINE_DOWNLOAD_TEST", // S9 下载与入库
                 "MP_ONLINE_UI_TEST",       // S6 在线视图界面
                 "MP_ONLINE_PLAY_TEST",     // S8 在线试听
