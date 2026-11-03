@@ -504,7 +504,9 @@ namespace musicPlayer.Data
         {
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM tracks WHERE last_seen_at < @session;";
+            // 只清本地来源：在线下载入库的曲目（source='online'）不在音乐文件夹里，
+            // 重扫"看不见"它们，但它们没失效——绝不能按 last_seen 清掉（S9 修）
+            cmd.CommandText = "DELETE FROM tracks WHERE last_seen_at < @session AND source != 'online';";
             cmd.Parameters.AddWithValue("@session", session);
             return cmd.ExecuteNonQuery();
         }
@@ -927,6 +929,14 @@ namespace musicPlayer.Data
                     p.AddWithValue("@error", (object?)error ?? DBNull.Value);
                     p.AddWithValue("@id", downloadId);
                 });
+        }
+
+        /// <summary>删除一条下载记录（自检清理用；正常历史保留）。</summary>
+        public static void DeleteDownload(long id)
+        {
+            using var conn = OpenConnection();
+            ExecuteNonQuery(conn, "DELETE FROM downloads WHERE id = @id;",
+                p => p.AddWithValue("@id", id));
         }
 
         /// <summary>

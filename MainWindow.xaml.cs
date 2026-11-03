@@ -138,6 +138,9 @@ namespace musicPlayer
             // 在线试听自检入口（S8，保留）：MP_ONLINE_PLAY_TEST=1/2，见方法注释
             _ = RunPlaybackTestIfRequestedAsync();
 
+            // 下载与入库自检入口（S9，保留）：MP_ONLINE_DOWNLOAD_TEST=1/2，见方法注释
+            _ = RunDownloadTestIfRequestedAsync();
+
             // 站点状态自愈（S7）：搜索把站点标成 need_login/broken 时，就地提示 + 同步内存状态
             OnlineSearchService.SiteStatusChanged += OnOnlineSiteStatusChanged;
 
@@ -172,7 +175,39 @@ namespace musicPlayer
             this.Closing += MainWindow_Closing;
             this.Closed += MainWindow_Closed;
 
+            InitDownloadEvents();
+            DownloadService.ResetInterruptedDownloads();   // 上次崩溃残留的 running → failed
             InitTrayIcon();
+        }
+
+        /// <summary>订阅下载队列事件（S9）：入库刷新 / 失败 Toast（事件在后台线程触发）。</summary>
+        private void InitDownloadEvents()
+        {
+            DownloadService.Completed += (item, path) => Dispatcher.BeginInvoke(() =>
+            {
+                LoadLibraryCache();
+                RefreshVisibleTracks();
+                ShowToast($"已入库「{item.Result.Title}」");
+                App.LogCrash($"[下载] 完成并入库：{path}");
+            });
+
+            DownloadService.Failed += (item, reason) => Dispatcher.BeginInvoke(() =>
+            {
+                // 403 且没带 Cookie → 大概率是站点要求登录，联动 S7 的状态徽章
+                if (reason.Contains("需要登录") && item.Result.SiteId > 0)
+                {
+                    Db.SetOnlineSiteStatus(item.Result.SiteId, "need_login");
+                    ShowToast($"「{item.Result.Title}」下载失败：{reason}（可在站点面板点「登录」）",
+                        warning: true);
+                }
+                else
+                {
+                    ShowToast($"「{item.Result.Title}」下载失败：{reason}", warning: true);
+                }
+            });
+
+            // 取消不用提示：按钮状态自己会变"重试"，点击时已经 Toast 过了
+            DownloadService.Cancelled += _ => { };
         }
 
         private void MainWindow_Closed(object? sender, EventArgs e)
@@ -204,9 +239,22 @@ namespace musicPlayer
         /// <summary>气泡提示一个会话只弹一次，之后最小化到托盘就安静地藏起来。</summary>
         private bool trayBalloonShown;
 
-        /// <summary>窗口关闭请求：托盘模式下取消关闭并隐藏到托盘，否则放行。</summary>
+        /// <summary>窗口关闭请求：下载中先确认；托盘模式下取消关闭并隐藏，否则放行。</summary>
         private void MainWindow_Closing(object? sender, CancelEventArgs e)
         {
+            // 退出保护（S9）：还有下载没干完 → 二次确认
+            if (DownloadService.HasWork)
+            {
+                int n = DownloadService.ActiveCount + DownloadService.PendingCount;
+                if (!ConfirmDialog.Confirm(this, "还有下载任务",
+                        $"有 {n} 个下载任务还没完成，退出会中止它们。\n确定要退出吗？", "退出"))
+                {
+                    e.Cancel = true;
+                    return;
+                }
+                DownloadService.CancelAll();
+            }
+
             if (isRealExit)
             {
                 DisposeTrayIcon();
@@ -2259,6 +2307,80 @@ namespace musicPlayer
         }
 
         /// <summary>
+        /// 下载与入库自检入口（保留的测试代码，S9 对应）：<c>MP_ONLINE_DOWNLOAD_TEST=1/2</c>。
+        /// =1 全自动：跑 <see cref="Services.DownloadSelfTest.RunAsync"/>（本地 http 夹具 + ffmpeg 真流），
+        ///   结果逐行落盘 %TEMP%\musicplayer_downloadtest.log，完成后自动退出；
+        /// =2 手动：本地服务器铺一条可下载的演示结果进在线列表，用户点行内"下载"按钮试真实链路。
+        /// </summary>
+        private async System.Threading.Tasks.Task RunDownloadTestIfRequestedAsync()
+        {
+            string mode = Environment.GetEnvironmentVariable("MP_ONLINE_DOWNLOAD_TEST") ?? "";
+            if (mode != "1" && mode != "2") return;
+
+            await System.Threading.Tasks.Task.Delay(1500);   // 等主窗口与数据库就绪
+
+            string logPath = Path.Combine(Path.GetTempPath(), "musicplayer_downloadtest.log");
+            void Log(string s)
+            {
+                try { File.AppendAllText(logPath, s + Environment.NewLine); } catch { }
+            }
+
+            try
+            {
+                try { File.WriteAllText(logPath, ""); } catch { }
+                Log($"[{DateTime.Now:HH:mm:ss}] 下载自检（MP_ONLINE_DOWNLOAD_TEST={mode}）");
+
+                // ── 手动模式：铺一条可下载的演示结果就走人 ──────────────────
+                if (mode == "2")
+                {
+                    string dir = Path.Combine(Path.GetTempPath(), "musicplayer_downloadtest");
+                    Directory.CreateDirectory(dir);
+                    string wav = Services.PlaybackSelfTest.CreateDemoWav(Path.Combine(dir, "manual-dl.wav"));
+                    var server = Services.PlaybackSelfTest.LocalHttpServer.Start(dir);
+
+                    EnterOnlineView();
+                    long siteId = Services.OnlineSearchSelfTest.EnsureDemoSite("演示站·下载");
+
+                    OnlineResults.Clear();
+                    onlineTrackMap.Clear();
+                    var r = new OnlineResult
+                    {
+                        Title = "演示曲·可下载",
+                        Artist = "自检",
+                        SiteName = "本地演示站",
+                        SiteId = siteId,
+                        AudioUrl = server.BaseUrl + "manual-dl.wav",
+                        DetailUrl = server.BaseUrl + "manual-dl.wav",
+                        CanDownload = true,
+                        Duration = TimeSpan.FromSeconds(30)
+                    };
+                    OnlineResults.Add(r);
+
+                    onlineSearched = true;
+                    RefreshOnlineSites(siteId);
+                    txtOnlineStatus.Text = "演示结果 1 条：点行内「下载」按钮试下载链路";
+                    UpdateOnlineEmptyState();
+                    ShowToast("测试：点「下载」，完成后去音乐库找「演示曲·可下载」");
+                    Log("手动模式：已铺可下载演示结果，等服务退出");
+                    return;
+                }
+
+                bool ok = await Services.DownloadSelfTest.RunAsync(Log);
+                Log($"[{DateTime.Now:HH:mm:ss}] 结束，全部通过 = {ok}");
+                ShowToast(ok ? "下载自检：全部通过" : "下载自检：存在失败项，详见日志",
+                    warning: !ok);
+
+                await System.Threading.Tasks.Task.Delay(1200);
+                Application.Current?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log("异常: " + ex);
+                ShowToast("下载自检异常，详见 %TEMP%\\musicplayer_downloadtest.log", warning: true);
+            }
+        }
+
+        /// <summary>
         /// 在线试听自检（保留的测试代码，S8 对应）：<c>MP_ONLINE_PLAY_TEST=1/2</c>。
         ///
         /// mode 1（全自动，跑完自动退出）：用本地 http 夹具走完整条试听链路，断言 18 项——
@@ -3308,7 +3430,10 @@ namespace musicPlayer
             PlayOnlineSelected(r);
         }
 
-        /// <summary>行内下载按钮（S9 接入下载队列；三态样式已就位）。</summary>
+        /// <summary>
+        /// 行内下载按钮（S9）：
+        /// 空闲 → 解析地址并入队；排队/下载中 → 再点一下 = 取消；失败/取消 → 点 = 重试。
+        /// </summary>
         private void btnOnlineDownload_Click(object sender, RoutedEventArgs e)
         {
             if ((sender as FrameworkElement)?.Tag is not OnlineResult r) return;
@@ -3319,8 +3444,104 @@ namespace musicPlayer
                     ? "这条结果不支持下载" : r.NotDownloadReason, warning: true);
                 return;
             }
-            ShowToast($"下载「{r.Title}」将在 S9 接入");
+
+            // 排队/下载中 → 再点一下 = 取消
+            if (r.DownloadState is DownloadState.Pending or DownloadState.Running)
+            {
+                bool cancelled = DownloadService.Cancel(r);
+                if (downloadResolveCts.TryGetValue(r, out var cts))
+                {
+                    try { cts.Cancel(); } catch { }
+                    cancelled = true;
+                }
+                ShowToast(cancelled ? $"已取消「{r.Title}」的下载" : "这条任务已经结束了");
+                return;
+            }
+
+            if (isOnlineSearching)
+            {
+                ShowToast("搜索还在进行，完成后再下载");
+                return;
+            }
+            if (isResolvingOnlineAudio)
+            {
+                ShowToast("正在解析播放地址，稍等");
+                return;
+            }
+
+            // 已有直链（搜索时抓到 / 之前播放或下载解析过）→ 免解析直接入队
+            if (!string.IsNullOrWhiteSpace(r.AudioUrl))
+            {
+                var direct = OnlineSearchService.DecideForUrl(r.AudioUrl!);
+                if (direct.Url != null)
+                {
+                    DownloadService.Enqueue(r, direct.Url, direct.IsStream, r.DetailUrl);
+                    ShowToast($"已加入下载队列「{r.Title}」");
+                    return;
+                }
+                r.DownloadState = DownloadState.Failed;
+                r.DownloadError = direct.Reason;
+                ShowToast($"无法下载「{r.Title}」：{direct.Reason}", warning: true);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(r.DetailUrl))
+            {
+                r.DownloadState = DownloadState.Failed;
+                r.DownloadError = "没有详情页链接，无法解析音频";
+                ShowToast(r.DownloadError, warning: true);
+                return;
+            }
+
+            // 需要先解析（详情页嗅探，最长约 8 秒）——按钮先显示"排队中"，后台解析
+            r.DownloadState = DownloadState.Pending;
+            r.DownloadError = "";
+            isResolvingOnlineAudio = true;
+            _resolvingResult = r;
+            var resolveCts = new CancellationTokenSource();
+            downloadResolveCts[r] = resolveCts;
+            _ = ResolveThenDownloadAsync(r, resolveCts.Token);
         }
+
+        /// <summary>下载前的地址解析（与播放共用 ResolveAudioAsync，流媒体地址也能下载）。</summary>
+        private async System.Threading.Tasks.Task ResolveThenDownloadAsync(OnlineResult r,
+            CancellationToken ct)
+        {
+            try
+            {
+                var resolved = await OnlineSearchService.ResolveAudioAsync(r, ct);
+                if (resolved.Url == null)
+                {
+                    r.DownloadState = DownloadState.Failed;
+                    r.DownloadError = resolved.Reason;
+                    ShowToast($"无法下载「{r.Title}」：{resolved.Reason}", warning: true);
+                    return;
+                }
+
+                DownloadService.Enqueue(r, resolved.Url, resolved.IsStream, r.DetailUrl);
+                ShowToast($"已加入下载队列「{r.Title}」");
+            }
+            catch (OperationCanceledException)
+            {
+                r.DownloadState = DownloadState.Cancelled;   // 解析阶段取消 → 直接回"重试"
+            }
+            catch (Exception ex)
+            {
+                App.LogCrash("[下载] 解析地址异常: " + ex);
+                r.DownloadState = DownloadState.Failed;
+                r.DownloadError = ex.Message;
+                ShowToast($"解析播放地址失败：{ex.Message}", warning: true);
+            }
+            finally
+            {
+                isResolvingOnlineAudio = false;
+                _resolvingResult = null;
+                if (downloadResolveCts.Remove(r, out var usedCts)) usedCts.Dispose();
+            }
+        }
+
+        /// <summary>下载前地址解析的取消源登记表（按结果条目取消）。</summary>
+        private readonly Dictionary<OnlineResult, CancellationTokenSource> downloadResolveCts = new();
 
         // ── 底部操作栏 ────────────────────────────────────────────────────────
 

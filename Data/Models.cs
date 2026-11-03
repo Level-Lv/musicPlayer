@@ -470,10 +470,13 @@ namespace musicPlayer.Data
             _ => CanDownload ? "下载" : "不可下载"
         };
 
-        /// <summary>下载按钮是否可点（未下载/失败可重试；下载中禁用）。</summary>
+        /// <summary>
+        /// 下载按钮是否可点。下载中/排队中也保持可点——**再点一下 = 取消**（S9）。
+        /// </summary>
         public bool IsDownloadEnabled =>
             CanDownload && DownloadState is DownloadState.None
-                or DownloadState.Failed or DownloadState.Cancelled;
+                or DownloadState.Failed or DownloadState.Cancelled
+                or DownloadState.Pending or DownloadState.Running;
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
